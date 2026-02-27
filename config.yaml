@@ -1,0 +1,61 @@
+# RAG System Configuration
+
+# PDF Processing
+pdf:
+  input_path: "data/raw/openstax_psychology_2e.pdf"
+  extract_images: false
+  preserve_layout: true
+
+# Text Chunking
+chunking:
+  strategy: "recursive"  # recursive, fixed, semantic
+  chunk_size: 800        # ~150-200 words; sweet spot for dense academic text
+  chunk_overlap: 100     # 100-char overlap preserves cross-boundary context
+  min_chunk_size: 150    # discard captions / stray headers shorter than this
+  respect_sentence_boundaries: true
+
+# Embedding
+embedding:
+  model_name: "sentence-transformers/all-MiniLM-L6-v2"
+  dimension: 384
+  batch_size: 32
+  normalize: true
+  device: "cpu"  # cpu or cuda
+
+# Vector Store
+vector_store:
+  type: "faiss"
+  index_type: "IndexFlatL2"  # IndexFlatL2, IndexIVFFlat
+  metric: "l2"
+  save_path: "vector_store/faiss_index"
+
+# Retrieval
+retrieval:
+  top_k: 5
+  score_threshold: null  # Optional minimum similarity score
+  rerank: false
+
+# Generation (NVIDIA API)
+generation:
+  model: "meta/llama-3.1-8b-instruct"
+  temperature: 0.2
+  max_tokens: 512
+  top_p: 0.9
+
+# Caching
+cache:
+  enabled: true
+  embeddings_dir: "embeddings/cache"
+  processed_chunks_path: "data/processed/chunks.jsonl"
+  use_content_hash: true
+
+# Reproducibility
+reproducibility:
+  random_seed: 42
+  deterministic: true
+
+# Logging
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "logs/rag_system.log"

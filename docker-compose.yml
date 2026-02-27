@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  rag-app:
+    build: .
+    container_name: rag-textbook-qa
+    volumes:
+      - ./data:/app/data
+      - ./embeddings:/app/embeddings
+      - ./vector_store:/app/vector_store
+      - ./models:/app/models
+      - ./outputs:/app/outputs
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: python scripts/run_pipeline.py --all

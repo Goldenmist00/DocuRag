@@ -1,0 +1,17 @@
+# Development Dependencies
+-r requirements.txt
+
+# Testing
+pytest==7.4.3
+pytest-cov==4.1.0
+pytest-mock==3.12.0
+
+# Code Quality
+black==23.12.1
+flake8==7.0.0
+isort==5.13.2
+mypy==1.8.0
+
+# Jupyter (optional for exploration)
+jupyter==1.0.0
+ipykernel==6.27.1

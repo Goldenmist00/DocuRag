@@ -1,0 +1,32 @@
+# Core Dependencies
+python-dotenv>=1.0.0
+
+# PDF Processing
+PyPDF2>=3.0.0
+pdfplumber>=0.10.0
+PyMuPDF>=1.24.0
+
+# Text Processing
+nltk>=3.8.0
+
+# Embeddings
+sentence-transformers>=2.5.0
+torch>=2.0.0
+transformers>=4.36.0
+
+# Vector Store
+faiss-cpu>=1.8.0
+numpy>=1.26.0
+
+# LLM Integration
+openai>=1.0.0
+requests>=2.31.0
+
+# Data Handling
+pandas>=2.0.0
+jsonlines>=4.0.0
+
+# Utilities
+tqdm>=4.66.0
+pyyaml>=6.0.0
+pydantic>=2.0.0
