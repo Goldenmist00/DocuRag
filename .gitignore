@@ -19,6 +19,7 @@ outputs/*.csv
 
 # Environment
 .env
+.env.example
 
 # IDE
 .vscode/
