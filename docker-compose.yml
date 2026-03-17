@@ -1,17 +1,41 @@
 version: '3.8'
 
 services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: rag-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-rag_db}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   rag-app:
     build: .
     container_name: rag-textbook-qa
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
       - ./data:/app/data
       - ./embeddings:/app/embeddings
-      - ./vector_store:/app/vector_store
       - ./models:/app/models
       - ./outputs:/app/outputs
     env_file:
       - .env
     environment:
       - PYTHONUNBUFFERED=1
+      - POSTGRES_HOST=postgres
     command: python scripts/run_pipeline.py --all
+
+volumes:
+  postgres_data:

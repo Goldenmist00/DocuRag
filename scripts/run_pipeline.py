@@ -14,6 +14,8 @@ import yaml
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.pdf_processor import run_ingestion, load_chunks, verify_chunks
+from src.embedder import Embedder, EmbeddingTier
+from src.vector_store import PgVectorStore
 
 def setup_logging():
     """Configure logging."""
@@ -61,16 +63,101 @@ def run_extract(logger):
 
 
 def run_embed(logger):
-    """Generate embeddings for chunks."""
+    """Generate embeddings for chunks (Phase 3)."""
     logger.info("Step 2: Generating embeddings...")
-    # TODO: Import and call embedder
-    logger.info("✓ Embedding generation complete")
+    
+    # Load config
+    cfg_path = Path("config.yaml")
+    cfg = {}
+    if cfg_path.exists():
+        with open(cfg_path) as f:
+            cfg = yaml.safe_load(f) or {}
+    
+    # Get paths and settings
+    chunks_path = cfg.get("cache", {}).get("processed_chunks_path", "data/processed/chunks.jsonl")
+    tier_name = cfg.get("embeddings", {}).get("default_tier", "balanced")
+    cache_dir = cfg.get("cache", {}).get("embeddings_cache", "embeddings/cache")
+    
+    # Map tier name to enum
+    tier_map = {
+        "fast": EmbeddingTier.FAST,
+        "balanced": EmbeddingTier.BALANCED,
+        "deep": EmbeddingTier.DEEP
+    }
+    tier = tier_map.get(tier_name, EmbeddingTier.BALANCED)
+    
+    # Load chunks
+    chunks = load_chunks(chunks_path)
+    logger.info(f"  Loaded {len(chunks)} chunks")
+    
+    # Initialize embedder
+    embedder = Embedder(tier=tier, cache_dir=cache_dir)
+    logger.info(f"  Using {embedder.model_name} ({embedder.embedding_dim}d)")
+    
+    # Generate embeddings
+    texts = [chunk["text"] for chunk in chunks]
+    embeddings = embedder.embed_batch(texts, batch_size=32, show_progress=True)
+    
+    stats = embedder.get_stats()
+    logger.info(f"✓ Generated {len(embeddings)} embeddings")
+    logger.info(f"  Cache hit rate: {stats['hit_rate']:.1%}")
+    
+    return chunks, embeddings, embedder.embedding_dim
 
-def run_index(logger):
-    """Build FAISS index."""
-    logger.info("Step 3: Building FAISS index...")
-    # TODO: Import and call vector_store
-    logger.info("✓ FAISS index built")
+def run_index(logger, chunks=None, embeddings=None, embedding_dim=None):
+    """Insert embeddings into PostgreSQL vector store (Phase 2)."""
+    logger.info("Step 3: Storing vectors in PostgreSQL...")
+    
+    # Load config
+    cfg_path = Path("config.yaml")
+    cfg = {}
+    if cfg_path.exists():
+        with open(cfg_path) as f:
+            cfg = yaml.safe_load(f) or {}
+    
+    # If not provided, load chunks and embeddings
+    if chunks is None or embeddings is None:
+        logger.info("  Loading chunks and embeddings...")
+        chunks_path = cfg.get("cache", {}).get("processed_chunks_path", "data/processed/chunks.jsonl")
+        chunks = load_chunks(chunks_path)
+        
+        # Need to regenerate embeddings
+        tier_name = cfg.get("embeddings", {}).get("default_tier", "balanced")
+        tier_map = {
+            "fast": EmbeddingTier.FAST,
+            "balanced": EmbeddingTier.BALANCED,
+            "deep": EmbeddingTier.DEEP
+        }
+        embedder = Embedder(tier=tier_map.get(tier_name, EmbeddingTier.BALANCED))
+        texts = [chunk["text"] for chunk in chunks]
+        embeddings = embedder.embed_batch(texts, batch_size=32, show_progress=False)
+        embedding_dim = embedder.embedding_dim
+    
+    # Connect to PostgreSQL
+    vector_store = PgVectorStore(
+        embedding_dim=embedding_dim,
+        host=cfg.get("postgres", {}).get("host", "localhost"),
+        port=cfg.get("postgres", {}).get("port", 5432),
+        database=cfg.get("postgres", {}).get("database", "rag_db"),
+        user=cfg.get("postgres", {}).get("user", "rag_user"),
+        password=cfg.get("postgres", {}).get("password", "rag_password")
+    )
+    
+    # Insert vectors
+    vector_store.insert_chunks(chunks, embeddings)
+    logger.info(f"  Inserted {len(chunks)} vectors")
+    
+    # Create index
+    vector_store.create_index(index_type="ivfflat")
+    logger.info(f"  Created IVFFlat index")
+    
+    # Show stats
+    stats = vector_store.get_stats()
+    logger.info(f"✓ Vector store ready")
+    logger.info(f"  Total chunks: {stats['total_chunks']}")
+    logger.info(f"  Unique pages: {stats['unique_pages']}")
+    
+    vector_store.close()
 
 def run_generate(logger):
     """Run Q&A generation."""
@@ -109,8 +196,8 @@ def main():
     try:
         if args.all:
             run_extract(logger)
-            run_embed(logger)
-            run_index(logger)
+            chunks, embeddings, embedding_dim = run_embed(logger)
+            run_index(logger, chunks, embeddings, embedding_dim)
             run_generate(logger)
         elif args.step == "extract":
             run_extract(logger)

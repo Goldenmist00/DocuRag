@@ -19,6 +19,7 @@ outputs/*.csv
 
 # Environment
 .env
+.env.example
 
 # IDE
 .vscode/
@@ -45,3 +46,6 @@ logs/
 
 # Skills files
 SKILLS.md
+
+# Docs
+README.md

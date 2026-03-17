@@ -14,20 +14,32 @@ chunking:
   min_chunk_size: 150    # discard captions / stray headers shorter than this
   respect_sentence_boundaries: true
 
-# Embedding
+# Embedding (Tiered Model Selection)
 embedding:
-  model_name: "sentence-transformers/all-MiniLM-L6-v2"
-  dimension: 384
+  # Tier: fast, balanced, or deep
+  # - fast: all-MiniLM-L6-v2 (384 dim, 80MB, ~2 min for 4k chunks)
+  # - balanced: BAAI/bge-base-en-v1.5 (768 dim, 438MB, ~6 min) [DEFAULT]
+  # - deep: BAAI/bge-large-en-v1.5 (1024 dim, 1.34GB, ~15 min)
+  tier: "balanced"
   batch_size: 32
   normalize: true
-  device: "cpu"  # cpu or cuda
+  device: "auto"  # auto, cpu, or cuda
+  cache_enabled: true
 
-# Vector Store
+# Vector Store (PostgreSQL + pgvector)
 vector_store:
-  type: "faiss"
-  index_type: "IndexFlatL2"  # IndexFlatL2, IndexIVFFlat
-  metric: "l2"
-  save_path: "vector_store/faiss_index"
+  type: "pgvector"
+  connection:
+    host: "localhost"
+    port: 5432
+    database: "rag_db"
+    user: "postgres"
+    password: "${POSTGRES_PASSWORD}"  # From .env
+  table_name: "document_chunks"
+  vector_dimensions: 768  # Must match embedding tier (384 for fast, 768 for balanced, 1024 for deep)
+  index_type: "ivfflat"  # or "hnsw" for better performance
+  lists: 100  # for ivfflat
+  probes: 10  # for ivfflat search
 
 # Retrieval
 retrieval:
