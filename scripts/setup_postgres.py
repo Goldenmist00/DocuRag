@@ -137,8 +137,13 @@ def main():
     host = os.getenv("POSTGRES_HOST", "localhost")
     port = int(os.getenv("POSTGRES_PORT", "5432"))
     user = os.getenv("POSTGRES_USER", "postgres")
-    password = os.getenv("POSTGRES_PASSWORD", "postgres")
+    password = os.getenv("POSTGRES_PASSWORD", "")
     database = os.getenv("POSTGRES_DB", "rag_db")
+
+    if not password:
+        logger.error("POSTGRES_PASSWORD environment variable is not set.")
+        logger.error("Add it to your .env file: POSTGRES_PASSWORD=yourpassword")
+        sys.exit(1)
     
     logger.info("=" * 60)
     logger.info("PostgreSQL Setup for RAG System")

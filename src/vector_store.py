@@ -1,20 +1,30 @@
 """
 vector_store.py
 ===============
-PostgreSQL + pgvector Vector Store Implementation
+Phase 2 — PostgreSQL + pgvector Vector Store
 
 Responsibilities:
-  1. Connect to PostgreSQL database with pgvector extension
+  1. Connect to PostgreSQL with pgvector extension
   2. Store document chunks with their embeddings
-  3. Perform vector similarity search
-  4. Manage indexes for optimal performance
-  5. Connection pooling and retry logic for production reliability
+  3. Perform cosine similarity search
+  4. Manage IVFFlat / HNSW indexes for fast retrieval
+  5. Connection pooling, retry logic, and performance metrics
+
+Usage:
+    from src.vector_store import PgVectorStore
+
+    vs = PgVectorStore(embedding_dim=768)
+    vs.insert_chunks(chunks, embeddings)
+    vs.create_index()
+    results = vs.search(query_embedding, top_k=5)
+    vs.close()
 """
 
 import logging
+import os
 import time
-from typing import List, Dict, Optional, Tuple
 from contextlib import contextmanager
+from typing import Dict, Generator, List, Optional
 
 import numpy as np
 import psycopg2
@@ -22,358 +32,507 @@ from psycopg2 import pool
 from psycopg2.extras import execute_values
 from pgvector.psycopg2 import register_vector
 
-from src.pdf_processor import Chunk
-
 logger = logging.getLogger(__name__)
 
 
 class PgVectorStore:
     """
-    PostgreSQL + pgvector vector store for RAG system.
-    
+    PostgreSQL + pgvector vector store for RAG document retrieval.
+
     Features:
-    - Connection pooling for better performance
-    - Retry logic with exponential backoff
-    - Comprehensive error handling
-    - Performance metrics tracking
+        - Thread-safe connection pooling
+        - Exponential-backoff retry on transient failures
+        - IVFFlat and HNSW index support
+        - Upsert semantics (safe to re-run ingestion)
+        - Performance timing on insert and search
     """
-    
+
+    # ------------------------------------------------------------------ #
+    #  Construction                                                        #
+    # ------------------------------------------------------------------ #
+
     def __init__(
         self,
+        embedding_dim: int,
         host: str = "localhost",
         port: int = 5432,
         database: str = "rag_db",
         user: str = "postgres",
-        password: str = "postgres",
+        password: Optional[str] = None,
         table_name: str = "document_chunks",
         min_connections: int = 1,
-        max_connections: int = 10
-    ):
+        max_connections: int = 10,
+    ) -> None:
         """
-        Initialize vector store with connection pooling.
-        
+        Initialise the vector store and verify the database connection.
+
         Args:
-            host: PostgreSQL host
-            port: PostgreSQL port
-            database: Database name
-            user: Database user
-            password: Database password
-            table_name: Table name for storing chunks
-            min_connections: Minimum connections in pool
-            max_connections: Maximum connections in pool
+            embedding_dim:    Dimensionality of the embedding vectors.
+                              Must match the model used (384 / 768 / 1024).
+            host:             PostgreSQL host.
+            port:             PostgreSQL port.
+            database:         Database name.
+            user:             Database user.
+            password:         Database password.
+            table_name:       Table that holds the document chunks.
+            min_connections:  Minimum pool size.
+            max_connections:  Maximum pool size.
+
+        Raises:
+            RuntimeError: If the connection pool cannot be created or the
+                          pgvector extension is not installed.
         """
-        self.connection_params = {
-            "host": host,
-            "port": port,
-            "database": database,
-            "user": user,
-            "password": password
-        }
+        self.embedding_dim = embedding_dim
         self.table_name = table_name
-        
-        # Initialize connection pool
+
+        # Prefer environment variables over constructor arguments
+        resolved_password = os.environ.get("POSTGRES_PASSWORD", password)
+        if not resolved_password:
+            raise ValueError(
+                "Database password is required. "
+                "Set POSTGRES_PASSWORD in your .env file."
+            )
+
+        self._conn_params: Dict = {
+            "host":     os.environ.get("POSTGRES_HOST",     host),
+            "port":     int(os.environ.get("POSTGRES_PORT", port)),
+            "database": os.environ.get("POSTGRES_DB",       database),
+            "user":     os.environ.get("POSTGRES_USER",     user),
+            "password": resolved_password,
+        }
+
         try:
-            self.connection_pool = pool.ThreadedConnectionPool(
+            self._pool = pool.ThreadedConnectionPool(
                 min_connections,
                 max_connections,
-                **self.connection_params
+                **self._conn_params,
             )
-            logger.info(f"✓ Connection pool created ({min_connections}-{max_connections} connections)")
-        except Exception as e:
-            raise RuntimeError(f"Failed to create connection pool: {e}") from e
-        
-        self._test_connection()
-    
-    def _test_connection(self):
+            logger.info(
+                "Connection pool created "
+                f"(min={min_connections}, max={max_connections})"
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to create connection pool: {exc}"
+            ) from exc
+
+        self._verify_connection()
+
+    # ------------------------------------------------------------------ #
+    #  Internal helpers                                                    #
+    # ------------------------------------------------------------------ #
+
+    def _verify_connection(self) -> None:
         """
-        Test database connection and pgvector extension.
-        
+        Confirm the database is reachable and pgvector is installed.
+
         Raises:
-            RuntimeError: If connection or pgvector extension check fails
+            RuntimeError: On connection failure or missing extension.
         """
         try:
-            with self._get_connection() as conn:
+            with self._connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute("SELECT 1")
-                    cur.execute("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
-                    result = cur.fetchone()
-                    if result:
-                        logger.info(f"✓ Connected to PostgreSQL with pgvector {result[0]}")
-                    else:
-                        raise RuntimeError("pgvector extension not installed")
-        except Exception as e:
-            raise RuntimeError(f"Failed to connect to PostgreSQL: {e}") from e
-    
+                    cur.execute(
+                        "SELECT extversion FROM pg_extension "
+                        "WHERE extname = 'vector'"
+                    )
+                    row = cur.fetchone()
+                    if row is None:
+                        raise RuntimeError(
+                            "pgvector extension is not installed. "
+                            "Run: CREATE EXTENSION vector;"
+                        )
+                    logger.info(
+                        f"Connected to PostgreSQL — pgvector {row[0]}"
+                    )
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(
+                f"Database connection failed: {exc}\n"
+                "Troubleshooting:\n"
+                "  1. Is PostgreSQL running?\n"
+                "  2. Are the credentials in config.yaml / .env correct?\n"
+                "  3. Has the schema been initialised? "
+                "Run: python scripts/setup_postgres.py"
+            ) from exc
+
     @contextmanager
-    def _get_connection(self):
+    def _connection(self) -> Generator:
         """
-        Context manager for database connections with retry logic.
-        
+        Yield a pooled connection with automatic commit / rollback and
+        exponential-backoff retry on transient errors.
+
         Yields:
-            psycopg2 connection with pgvector registered
+            psycopg2 connection with pgvector types registered.
+
+        Raises:
+            Exception: After all retry attempts are exhausted.
         """
         max_retries = 3
-        retry_delay = 1  # seconds
-        
+        delay = 1.0
+
         for attempt in range(max_retries):
             conn = None
             try:
-                conn = self.connection_pool.getconn()
-                register_vector(conn)  # Register pgvector types
+                conn = self._pool.getconn()
+                register_vector(conn)
                 yield conn
                 conn.commit()
                 return
-            except Exception as e:
+            except Exception as exc:
                 if conn:
                     conn.rollback()
-                
                 if attempt < max_retries - 1:
-                    logger.warning(f"Connection attempt {attempt + 1} failed, retrying in {retry_delay}s...")
-                    time.sleep(retry_delay)
-                    retry_delay *= 2  # Exponential backoff
+                    logger.warning(
+                        f"DB attempt {attempt + 1}/{max_retries} failed "
+                        f"({exc}). Retrying in {delay:.1f}s…"
+                    )
+                    time.sleep(delay)
+                    delay *= 2
                 else:
-                    logger.error(f"All connection attempts failed: {e}")
+                    logger.error("All DB retry attempts exhausted.")
                     raise
             finally:
                 if conn:
-                    self.connection_pool.putconn(conn)
-    
+                    self._pool.putconn(conn)
+
+    # ------------------------------------------------------------------ #
+    #  Public API                                                          #
+    # ------------------------------------------------------------------ #
+
     def insert_chunks(
         self,
-        chunks: List[Chunk],
+        chunks: List[Dict],
         embeddings: np.ndarray,
-        batch_size: int = 100
+        batch_size: int = 100,
     ) -> int:
         """
-        Insert chunks with their embeddings into the database.
-        
+        Upsert document chunks together with their embedding vectors.
+
+        Chunks can be either ``Chunk`` dataclass instances or plain dicts
+        (as loaded from a JSONL file).  The following keys / attributes
+        are expected::
+
+            chunk_id, text, section_id, chapter_id, section_title,
+            page_num, chunk_index, char_count, word_count
+
         Args:
-            chunks: List of Chunk objects
-            embeddings: numpy array of shape (n_chunks, embedding_dim)
-            batch_size: Number of chunks to insert per batch
-        
+            chunks:     List of chunk objects or dicts.
+            embeddings: Float32 array of shape ``(n, embedding_dim)``.
+            batch_size: Rows per INSERT statement.
+
         Returns:
-            Number of chunks inserted
-            
+            Number of rows upserted.
+
         Raises:
-            ValueError: If chunks and embeddings length mismatch
-            RuntimeError: If insertion fails
+            ValueError:   If ``len(chunks) != len(embeddings)``.
+            RuntimeError: On database error.
         """
         if len(chunks) != len(embeddings):
-            raise ValueError(f"Mismatch: {len(chunks)} chunks but {len(embeddings)} embeddings")
-        
-        logger.info(f"Inserting {len(chunks)} chunks into {self.table_name}")
-        start_time = time.time()
-        
-        insert_query = f"""
+            raise ValueError(
+                f"Length mismatch: {len(chunks)} chunks vs "
+                f"{len(embeddings)} embeddings."
+            )
+
+        logger.info(f"Upserting {len(chunks)} chunks → {self.table_name}")
+        t0 = time.time()
+
+        sql = f"""
             INSERT INTO {self.table_name} (
                 chunk_id, text, embedding,
                 section_id, chapter_id, section_title,
-                page_start, page_end,
-                chunk_index_in_section, char_count, word_count
+                page_num, chunk_index, char_count, word_count
             ) VALUES %s
             ON CONFLICT (chunk_id) DO UPDATE SET
-                text = EXCLUDED.text,
-                embedding = EXCLUDED.embedding,
+                text       = EXCLUDED.text,
+                embedding  = EXCLUDED.embedding,
                 updated_at = CURRENT_TIMESTAMP
         """
-        
+
+        def _get(obj, attr: str, default=None):
+            """Unified attribute / key access for dataclass or dict."""
+            if isinstance(obj, dict):
+                return obj.get(attr, default)
+            return getattr(obj, attr, default)
+
         inserted = 0
         try:
-            with self._get_connection() as conn:
+            with self._connection() as conn:
                 with conn.cursor() as cur:
                     for i in range(0, len(chunks), batch_size):
-                        batch_chunks = chunks[i:i + batch_size]
-                        batch_embeddings = embeddings[i:i + batch_size]
-                        
-                        values = [
+                        batch_c = chunks[i : i + batch_size]
+                        batch_e = embeddings[i : i + batch_size]
+
+                        rows = [
                             (
-                                chunk.chunk_id,
-                                chunk.text,
-                                batch_embeddings[j].tolist(),
-                                chunk.section_id,
-                                chunk.chapter_id,
-                                chunk.section_title,
-                                chunk.page_start,
-                                chunk.page_end,
-                                chunk.chunk_index_in_section,
-                                chunk.char_count,
-                                chunk.word_count
+                                _get(c, "chunk_id"),
+                                _get(c, "text"),
+                                batch_e[j].tolist(),
+                                _get(c, "section_id"),
+                                _get(c, "chapter_id"),
+                                _get(c, "section_title"),
+                                _get(c, "page_num"),
+                                _get(c, "chunk_index", 0),
+                                _get(c, "char_count", 0),
+                                _get(c, "word_count", 0),
                             )
-                            for j, chunk in enumerate(batch_chunks)
+                            for j, c in enumerate(batch_c)
                         ]
-                        
-                        execute_values(cur, insert_query, values)
-                        inserted += len(batch_chunks)
-                        
-                        if (i + batch_size) % 500 == 0:
-                            logger.info(f"Progress: {inserted}/{len(chunks)} chunks")
-            
-            elapsed = time.time() - start_time
-            logger.info(f"✓ Inserted {inserted} chunks in {elapsed:.2f}s ({inserted/elapsed:.1f} chunks/s)")
+
+                        execute_values(cur, sql, rows)
+                        inserted += len(batch_c)
+                        logger.debug(f"  {inserted}/{len(chunks)} rows inserted")
+
+            elapsed = time.time() - t0
+            logger.info(
+                f"✓ Upserted {inserted} chunks in {elapsed:.2f}s "
+                f"({inserted / elapsed:.0f} rows/s)"
+            )
             return inserted
-            
-        except Exception as e:
-            logger.error(f"Insertion failed after {inserted} chunks: {e}")
-            raise RuntimeError(f"Failed to insert chunks: {e}") from e
-    
-    def create_index(self, index_type: str = "ivfflat", lists: int = 100):
+
+        except Exception as exc:
+            raise RuntimeError(
+                f"insert_chunks failed after {inserted} rows: {exc}"
+            ) from exc
+
+    def create_index(
+        self,
+        index_type: str = "ivfflat",
+        lists: int = 100,
+        m: int = 16,
+        ef_construction: int = 64,
+    ) -> None:
         """
-        Create vector similarity index.
-        
+        Build a vector similarity index on the embedding column.
+
+        For small datasets (<10 k rows) an index may not improve speed;
+        for large datasets it is essential.
+
         Args:
-            index_type: "ivfflat" or "hnsw"
-            lists: Number of lists for IVFFlat (ignored for HNSW)
+            index_type:      ``"ivfflat"`` (default) or ``"hnsw"``.
+            lists:           IVFFlat: number of inverted lists.
+                             Rule of thumb: ``rows / 1000`` (min 10).
+            m:               HNSW: max connections per layer.
+            ef_construction: HNSW: size of the dynamic candidate list
+                             during index construction.
+
+        Raises:
+            ValueError:   For unknown ``index_type``.
+            RuntimeError: On database error.
         """
-        logger.info(f"Creating {index_type} index on embeddings...")
-        
-        with self._get_connection() as conn:
-            with conn.cursor() as cur:
-                # Drop existing index if any
-                cur.execute(f"DROP INDEX IF EXISTS idx_embedding_{index_type}")
-                
-                if index_type == "ivfflat":
-                    # IVFFlat: faster build, good for most use cases
-                    cur.execute(f"""
-                        CREATE INDEX idx_embedding_ivfflat 
-                        ON {self.table_name} 
-                        USING ivfflat (embedding vector_cosine_ops) 
-                        WITH (lists = {lists})
-                    """)
-                elif index_type == "hnsw":
-                    # HNSW: slower build, better query performance
-                    cur.execute(f"""
-                        CREATE INDEX idx_embedding_hnsw 
-                        ON {self.table_name} 
-                        USING hnsw (embedding vector_cosine_ops)
-                    """)
-                else:
-                    raise ValueError(f"Unknown index type: {index_type}")
-        
-        logger.info(f"✓ Created {index_type} index")
-    
+        logger.info(f"Building {index_type.upper()} index…")
+        t0 = time.time()
+
+        try:
+            with self._connection() as conn:
+                with conn.cursor() as cur:
+                    # Remove any stale index first
+                    cur.execute(
+                        "DROP INDEX IF EXISTS idx_chunks_embedding_ivfflat"
+                    )
+                    cur.execute(
+                        "DROP INDEX IF EXISTS idx_chunks_embedding_hnsw"
+                    )
+
+                    if index_type == "ivfflat":
+                        cur.execute(f"""
+                            CREATE INDEX idx_chunks_embedding_ivfflat
+                            ON {self.table_name}
+                            USING ivfflat (embedding vector_cosine_ops)
+                            WITH (lists = {lists})
+                        """)
+                    elif index_type == "hnsw":
+                        cur.execute(f"""
+                            CREATE INDEX idx_chunks_embedding_hnsw
+                            ON {self.table_name}
+                            USING hnsw (embedding vector_cosine_ops)
+                            WITH (m = {m}, ef_construction = {ef_construction})
+                        """)
+                    else:
+                        raise ValueError(
+                            f"Unknown index_type '{index_type}'. "
+                            "Choose 'ivfflat' or 'hnsw'."
+                        )
+
+            elapsed = time.time() - t0
+            logger.info(
+                f"✓ {index_type.upper()} index created in {elapsed:.2f}s"
+            )
+
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(
+                f"create_index failed: {exc}"
+            ) from exc
+
     def search(
         self,
         query_embedding: np.ndarray,
-        top_k: int = 5,
-        probes: Optional[int] = None
+        top_k: int = 10,
+        probes: int = 10,
     ) -> List[Dict]:
         """
-        Search for similar chunks using cosine similarity.
-        
+        Retrieve the ``top_k`` most similar chunks via cosine similarity.
+
         Args:
-            query_embedding: Query vector of shape (embedding_dim,)
-            top_k: Number of results to return
-            probes: Number of probes for IVFFlat (None = default)
-        
+            query_embedding: 1-D float array of shape ``(embedding_dim,)``.
+            top_k:           Number of results to return.
+            probes:          IVFFlat search probes (higher = more accurate,
+                             slower).  Ignored when using HNSW.
+
         Returns:
-            List of dicts with chunk data and similarity scores
-            
+            List of result dicts, each containing::
+
+                chunk_id, text, section_id, chapter_id, section_title,
+                page_num, chunk_index, char_count, word_count, score
+
+            Sorted by ``score`` descending (most similar first).
+
         Raises:
-            RuntimeError: If search fails
+            RuntimeError: On database error.
         """
+        t0 = time.time()
+        vec = query_embedding.tolist()
+
         try:
-            start_time = time.time()
-            query_vector = query_embedding.tolist()
-            
-            with self._get_connection() as conn:
+            with self._connection() as conn:
                 with conn.cursor() as cur:
-                    # Set probes for IVFFlat if specified
-                    if probes is not None:
-                        cur.execute(f"SET ivfflat.probes = {probes}")
-                    
-                    # Cosine similarity search (1 - cosine_distance)
-                    cur.execute(f"""
-                        SELECT 
-                            chunk_id, text, 
-                            section_id, chapter_id, section_title,
-                            page_start, page_end,
-                            chunk_index_in_section, char_count, word_count,
-                            1 - (embedding <=> %s::vector) AS similarity
+                    cur.execute(f"SET ivfflat.probes = {probes}")
+
+                    cur.execute(
+                        f"""
+                        SELECT
+                            chunk_id,
+                            text,
+                            section_id,
+                            chapter_id,
+                            section_title,
+                            page_num,
+                            chunk_index,
+                            char_count,
+                            word_count,
+                            1 - (embedding <=> %s::vector) AS score
                         FROM {self.table_name}
                         ORDER BY embedding <=> %s::vector
                         LIMIT %s
-                    """, (query_vector, query_vector, top_k))
-                    
-                    results = []
-                    for row in cur.fetchall():
-                        results.append({
-                            "chunk_id": row[0],
-                            "text": row[1],
-                            "section_id": row[2],
-                            "chapter_id": row[3],
+                        """,
+                        (vec, vec, top_k),
+                    )
+
+                    results = [
+                        {
+                            "chunk_id":      row[0],
+                            "text":          row[1],
+                            "section_id":    row[2],
+                            "chapter_id":    row[3],
                             "section_title": row[4],
-                            "page_start": row[5],
-                            "page_end": row[6],
-                            "chunk_index_in_section": row[7],
-                            "char_count": row[8],
-                            "word_count": row[9],
-                            "similarity": float(row[10])
-                        })
-                    
-                    elapsed = time.time() - start_time
-                    logger.info(f"✓ Search completed in {elapsed*1000:.1f}ms, found {len(results)} results")
-                    return results
-                    
-        except Exception as e:
-            logger.error(f"Search failed: {e}")
-            raise RuntimeError(f"Vector search failed: {e}") from e
-    
+                            "page_num":      row[5],
+                            "chunk_index":   row[6],
+                            "char_count":    row[7],
+                            "word_count":    row[8],
+                            "score":         float(row[9]),
+                        }
+                        for row in cur.fetchall()
+                    ]
+
+            elapsed = (time.time() - t0) * 1000
+            logger.info(
+                f"✓ Search returned {len(results)} results in {elapsed:.1f}ms"
+            )
+            return results
+
+        except Exception as exc:
+            raise RuntimeError(f"search failed: {exc}") from exc
+
     def get_stats(self) -> Dict:
         """
-        Get database statistics.
-        
+        Return summary statistics about the stored chunks.
+
         Returns:
-            Dictionary with chunk counts and metadata
+            Dict with keys: ``total_chunks``, ``unique_sections``,
+            ``unique_chapters``, ``unique_pages``, ``embedding_dim``,
+            ``has_index``.
         """
         try:
-            with self._get_connection() as conn:
+            with self._connection() as conn:
                 with conn.cursor() as cur:
-                    cur.execute(f"SELECT COUNT(*) FROM {self.table_name}")
-                    total_chunks = cur.fetchone()[0]
-                    
-                    cur.execute(f"""
-                        SELECT COUNT(DISTINCT section_id) FROM {self.table_name}
-                    """)
-                    unique_sections = cur.fetchone()[0]
-                    
-                    cur.execute(f"""
-                        SELECT COUNT(DISTINCT chapter_id) FROM {self.table_name}
-                    """)
-                    unique_chapters = cur.fetchone()[0]
-                    
-                    return {
-                        "total_chunks": total_chunks,
-                        "unique_sections": unique_sections,
-                        "unique_chapters": unique_chapters
-                    }
-        except Exception as e:
-            logger.error(f"Failed to get stats: {e}")
+                    cur.execute(
+                        f"SELECT COUNT(*) FROM {self.table_name}"
+                    )
+                    total = cur.fetchone()[0]
+
+                    cur.execute(
+                        f"SELECT COUNT(DISTINCT section_id) "
+                        f"FROM {self.table_name}"
+                    )
+                    sections = cur.fetchone()[0]
+
+                    cur.execute(
+                        f"SELECT COUNT(DISTINCT chapter_id) "
+                        f"FROM {self.table_name}"
+                    )
+                    chapters = cur.fetchone()[0]
+
+                    cur.execute(
+                        f"SELECT COUNT(DISTINCT page_num) "
+                        f"FROM {self.table_name}"
+                    )
+                    pages = cur.fetchone()[0]
+
+                    cur.execute(
+                        """
+                        SELECT COUNT(*) FROM pg_indexes
+                        WHERE tablename = %s
+                          AND indexname LIKE 'idx_chunks_embedding%%'
+                        """,
+                        (self.table_name,),
+                    )
+                    has_index = cur.fetchone()[0] > 0
+
             return {
-                "total_chunks": 0,
+                "total_chunks":    total,
+                "unique_sections": sections,
+                "unique_chapters": chapters,
+                "unique_pages":    pages,
+                "embedding_dim":   self.embedding_dim,
+                "has_index":       has_index,
+            }
+
+        except Exception as exc:
+            logger.error(f"get_stats failed: {exc}")
+            return {
+                "total_chunks":    0,
                 "unique_sections": 0,
                 "unique_chapters": 0,
-                "error": str(e)
+                "unique_pages":    0,
+                "embedding_dim":   self.embedding_dim,
+                "has_index":       False,
+                "error":           str(exc),
             }
-    
-    def clear(self):
+
+    def clear(self) -> None:
         """
-        Clear all data from the table.
-        
-        Warning: This operation cannot be undone!
+        Delete all rows from the chunks table.
+
+        Warning:
+            This is irreversible.  Re-run ingestion to repopulate.
         """
-        logger.warning(f"Clearing all data from {self.table_name}")
+        logger.warning(f"Clearing all rows from '{self.table_name}'…")
         try:
-            with self._get_connection() as conn:
+            with self._connection() as conn:
                 with conn.cursor() as cur:
-                    cur.execute(f"TRUNCATE TABLE {self.table_name} RESTART IDENTITY")
-            logger.info("✓ Table cleared")
-        except Exception as e:
-            logger.error(f"Failed to clear table: {e}")
-            raise RuntimeError(f"Table clear failed: {e}") from e
-    
-    def close(self):
-        """Close all connections in the pool."""
-        if hasattr(self, 'connection_pool'):
-            self.connection_pool.closeall()
-            logger.info("✓ Connection pool closed")
+                    cur.execute(
+                        f"TRUNCATE TABLE {self.table_name} RESTART IDENTITY"
+                    )
+            logger.info("✓ Table cleared.")
+        except Exception as exc:
+            raise RuntimeError(f"clear failed: {exc}") from exc
+
+    def close(self) -> None:
+        """Return all connections to the pool and shut it down."""
+        if hasattr(self, "_pool"):
+            self._pool.closeall()
+            logger.info("Connection pool closed.")
