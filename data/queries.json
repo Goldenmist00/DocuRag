@@ -1,0 +1,22 @@
+[
+  {
+    "query_id": "q001",
+    "question": "What is psychology?"
+  },
+  {
+    "query_id": "q002",
+    "question": "Who are considered the founders of psychology as a science?"
+  },
+  {
+    "query_id": "q003",
+    "question": "What is the American Psychological Association (APA)?"
+  },
+  {
+    "query_id": "q004",
+    "question": "Why is scientific research important in psychology?"
+  },
+  {
+    "query_id": "q005",
+    "question": "What are the two types of statistics used in analyzing psychological data?"
+  }
+]
