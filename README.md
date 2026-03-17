@@ -1,14 +1,24 @@
 # RAG System for OpenStax Psychology 2e Q&A
 
-Production-ready Retrieval-Augmented Generation system for textbook-based question answering.
+Production-ready Retrieval-Augmented Generation system with citation-verifiable answers.
+
+## Project Status: 70% Complete ✅
+
+- ✅ Phase 1: PDF Processing & Chunking
+- ✅ Phase 2: PostgreSQL Vector Store (pgvector)
+- ✅ Phase 3: Three-Tier Embedding System
+- ⏳ Phase 4: Two-Stage Retrieval (Next)
+- ⏳ Phase 5: NVIDIA LLM Generation
+- ⏳ Phase 6: End-to-End Pipeline
 
 ## Project Overview
 
 - **Corpus**: OpenStax Psychology 2e PDF (~800 pages)
 - **Task**: Answer queries with grounded responses including section references and page numbers
-- **Embedding**: Local embedding model (sentence-transformers)
-- **Vector Store**: FAISS for efficient similarity search
+- **Embedding**: Three-tier system (fast/balanced/deep) using sentence-transformers
+- **Vector Store**: PostgreSQL with pgvector extension
 - **LLM**: NVIDIA free-tier API for answer generation
+- **Architecture**: Two-stage retrieval (vector search + cross-encoder reranking)
 
 ## Quick Start
 
@@ -22,8 +32,9 @@ Production-ready Retrieval-Augmented Generation system for textbook-based questi
 ### Installation
 
 ```bash
-# Clone or navigate to project directory
-cd rag-textbook-qa
+# Clone repository
+git clone https://github.com/Goldenmist00/Doctrace.git
+cd Doctrace
 
 # Create virtual environment
 python -m venv venv
@@ -36,9 +47,27 @@ source venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
+```
 
-# Download embedding model (first run only)
-python scripts/download_models.py
+### Database Setup
+
+**Option A: Cloud PostgreSQL (Recommended for Hackathons)**
+1. Sign up at https://neon.tech (free, no credit card)
+2. Create a project
+3. Copy connection string
+4. Update `config.yaml` with your connection details
+
+**Option B: Local PostgreSQL**
+```bash
+# Install PostgreSQL + pgvector extension
+# Then run:
+python scripts/setup_postgres.py
+```
+
+**Option C: Docker (Optional)**
+```bash
+docker-compose up -d
+python scripts/setup_postgres.py
 ```
 
 ### Configuration
@@ -89,33 +118,59 @@ rag-textbook-qa/
 
 ## Running the Pipeline
 
-### Step-by-step execution:
+### Quick Start (Recommended)
 
 ```bash
 # 1. Process PDF and create chunks
+python scripts/test_pdf_chunking.py data/raw/your-book.pdf
+
+# 2. Generate embeddings and store in database (all-in-one)
+python scripts/embed_and_store.py --tier balanced --clear --create-index
+
+# 3. Test vector search
+python scripts/test_vector_search.py --query "What is memory?" --top-k 5
+```
+
+### Step-by-Step Execution
+
+```bash
+# 1. Extract and chunk PDF
 python scripts/run_pipeline.py --step extract
 
 # 2. Generate embeddings
 python scripts/run_pipeline.py --step embed
 
-# 3. Build FAISS index
+# 3. Store vectors and create index
 python scripts/run_pipeline.py --step index
 
-# 4. Run Q&A pipeline
+# 4. Run Q&A pipeline (when ready)
 python scripts/run_pipeline.py --step generate
 
 # Or run all steps at once:
 python scripts/run_pipeline.py --all
 ```
 
+### Embedding Tiers
+
+Choose based on your needs:
+
+- **Fast** (384d, 80MB): Quick prototyping, ~13 chunks/s
+- **Balanced** (768d, 438MB): Production default, ~3 chunks/s ⭐
+- **Deep** (1024d, 1.34GB): Maximum precision, ~1-2 chunks/s
+
+```bash
+# Use specific tier
+python scripts/embed_and_store.py --tier fast --clear --create-index
+```
+
 ### Caching Strategy
 
-- **Embeddings**: Cached in `embeddings/cache/` as pickle files
-- **FAISS Index**: Saved in `vector_store/faiss_index/`
+- **Embeddings**: Content-based caching with SHA-256 hashing in `embeddings/cache/`
+- **Models**: Auto-downloaded to `models/sentence-transformers/` on first use
 - **Processed Chunks**: Stored in `data/processed/chunks.jsonl`
-- **Models**: Downloaded once to `models/` directory
+- **Vector Index**: PostgreSQL IVFFlat/HNSW index for fast search
 
-Subsequent runs will skip already-completed steps unless `--force` flag is used.
+Second runs use cached embeddings (100% hit rate) for instant results.
 
 ## Docker Setup (Optional)
 
@@ -154,11 +209,46 @@ black src/ scripts/
 flake8 src/ scripts/
 ```
 
+## Documentation
+
+- **[USAGE.md](docs/USAGE.md)** - Complete usage guide
+- **[EMBEDDER.md](docs/EMBEDDER.md)** - Embedding system documentation
+- **[INTEGRATION_COMPLETE.md](docs/INTEGRATION_COMPLETE.md)** - Phase 3 completion summary
+- **[IMPROVEMENTS.md](IMPROVEMENTS.md)** - Code quality improvements
+- **[TODO.md](TODO.md)** - Task tracking (70% complete)
+
+## Key Features
+
+✅ Three-tier embedding system (fast/balanced/deep)
+✅ Content-based caching with SHA-256 hashing
+✅ PostgreSQL + pgvector for scalable vector storage
+✅ Connection pooling and retry logic
+✅ Performance metrics tracking
+✅ Comprehensive error handling
+✅ Type hints and docstrings throughout
+✅ GPU acceleration support
+
 ## Troubleshooting
 
-**Out of Memory**: Reduce batch size in config or process in smaller chunks
-**FAISS Issues**: Ensure numpy version compatibility
-**PDF Extraction**: Install poppler-utils if using pdf2image
+**PostgreSQL Connection Issues**:
+```bash
+docker-compose down
+docker-compose up -d
+docker-compose logs postgres
+```
+
+**Models Not Downloading**:
+```bash
+python scripts/download_models.py
+```
+
+**Clear Cache**:
+```bash
+rm -rf embeddings/cache/*
+python scripts/embed_and_store.py --clear
+```
+
+**Out of Memory**: Use fast tier or reduce batch size in scripts
 
 ## License
 

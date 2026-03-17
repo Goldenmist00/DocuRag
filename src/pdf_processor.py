@@ -92,7 +92,15 @@ _ARTIFACTS_RE = [
 # ---------------------------------------------------------------------------
 
 def _clean_text(text: str) -> str:
-    """Advanced cleaning of formatting artifacts & OCR noise."""
+    """
+    Advanced cleaning of formatting artifacts & OCR noise.
+    
+    Args:
+        text: Raw text from PDF extraction
+        
+    Returns:
+        Cleaned text with artifacts removed
+    """
     # Strip known artifacts
     for pattern in _ARTIFACTS_RE:
         text = pattern.sub("", text)
@@ -106,20 +114,46 @@ def _clean_text(text: str) -> str:
 
 
 def extract_pages(pdf_path: str) -> List[PageRecord]:
-    """Memory-efficient PDF text extraction."""
+    """
+    Memory-efficient PDF text extraction with error handling.
+    
+    Args:
+        pdf_path: Path to PDF file
+        
+    Returns:
+        List of PageRecord objects with cleaned text
+        
+    Raises:
+        FileNotFoundError: If PDF file doesn't exist
+        RuntimeError: If PDF extraction fails
+    """
     pdf_path = Path(pdf_path)
     if not pdf_path.exists():
         raise FileNotFoundError(f"PDF not found: {pdf_path}")
 
     records: List[PageRecord] = []
-    with fitz.open(str(pdf_path)) as doc:
-        for page_idx in range(len(doc)):
-            raw_text = doc[page_idx].get_text("text")
-            records.append(PageRecord(
-                page_number=page_idx + 1,
-                text=_clean_text(raw_text)
-            ))
-    return records
+    try:
+        with fitz.open(str(pdf_path)) as doc:
+            total_pages = len(doc)
+            logger.info(f"Extracting {total_pages} pages from PDF...")
+            
+            for page_idx in range(total_pages):
+                try:
+                    raw_text = doc[page_idx].get_text("text")
+                    records.append(PageRecord(
+                        page_number=page_idx + 1,
+                        text=_clean_text(raw_text)
+                    ))
+                except Exception as e:
+                    logger.warning(f"Failed to extract page {page_idx + 1}: {e}")
+                    # Add empty page record to maintain page numbering
+                    records.append(PageRecord(page_number=page_idx + 1, text=""))
+            
+            logger.info(f"✓ Extracted {len(records)} pages")
+            return records
+            
+    except Exception as e:
+        raise RuntimeError(f"PDF extraction failed: {e}") from e
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +161,19 @@ def extract_pages(pdf_path: str) -> List[PageRecord]:
 # ---------------------------------------------------------------------------
 
 def detect_sections(pages: List[PageRecord]) -> List[SectionBlock]:
-    """Detect Chapter/Section hierarchy for better citation anchoring."""
+    """
+    Detect Chapter/Section hierarchy for better citation anchoring.
+    
+    Args:
+        pages: List of PageRecord objects
+        
+    Returns:
+        List of SectionBlock objects with hierarchical metadata
+    """
+    if not pages:
+        logger.warning("No pages provided for section detection")
+        return []
+    
     full_text_parts: List[str] = []
     offset_to_page: List[int] = []
 
@@ -137,6 +183,7 @@ def detect_sections(pages: List[PageRecord]) -> List[SectionBlock]:
         offset_to_page.extend([record.page_number] * len(chunk))
 
     full_text = "".join(full_text_parts)
+    logger.info(f"Detecting sections in {len(full_text)} characters...")
 
     # Find Chapters and Sections
     chapters = list(_CHAPTER_RE.finditer(full_text))
@@ -168,8 +215,21 @@ def detect_sections(pages: List[PageRecord]) -> List[SectionBlock]:
         match = marker["match"]
         if marker["type"] == "chapter":
             current_chapter = match.group(1)
-            # Chapter marker itself doesn't need to be a block if it's followed by sections,
-            # but we record it to update the context.
+            # Create a block for chapter intro text (before first section)
+            # Only if there's substantial text before next marker
+            if i+1 < len(markers) and end - start > 100:
+                section_id = f"{current_chapter}.0"
+                section_title = f"Chapter {current_chapter} Introduction"
+                p_start = offset_to_page[start]
+                p_end = offset_to_page[min(end, len(offset_to_page)-1)]
+                blocks.append(SectionBlock(
+                    chapter_id=current_chapter,
+                    section_id=section_id,
+                    section_title=section_title,
+                    page_start=p_start,
+                    page_end=p_end,
+                    text=text
+                ))
             continue
         
         section_id = match.group(1)
@@ -200,7 +260,23 @@ def chunk_sections(
     chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
     min_chunk: int = DEFAULT_MIN_CHUNK
 ) -> List[Chunk]:
-    """Produce overlapping chunks with sentence-boundary awareness."""
+    """
+    Produce overlapping chunks with sentence-boundary awareness.
+    
+    Args:
+        sections: List of SectionBlock objects
+        chunk_size: Maximum characters per chunk
+        chunk_overlap: Characters to overlap between chunks
+        min_chunk: Minimum chunk size to keep
+        
+    Returns:
+        List of Chunk objects with metadata
+    """
+    if not sections:
+        logger.warning("No sections provided for chunking")
+        return []
+    
+    logger.info(f"Chunking {len(sections)} sections (size={chunk_size}, overlap={chunk_overlap})...")
     all_chunks = []
     for section in sections:
         sentences = [s.strip() for s in _SENTENCE_END_RE.split(section.text) if s.strip()]
@@ -225,13 +301,18 @@ def chunk_sections(
                     ))
                     idx += 1
                 
-                # Handle overlap: keep last N sentences for context preservation
-                # Simplification: keep last sentence if it's within overlap budget
-                if len(current_chunk_sentences[-1]) < chunk_overlap:
-                    current_chunk_sentences = [current_chunk_sentences[-1]]
-                else:
-                    current_chunk_sentences = []
-                current_len = sum(len(s)+1 for s in current_chunk_sentences)
+                # Handle overlap: keep last N sentences up to overlap budget
+                overlap_sentences = []
+                overlap_len = 0
+                for sent in reversed(current_chunk_sentences):
+                    sent_len = len(sent) + 1
+                    if overlap_len + sent_len <= chunk_overlap:
+                        overlap_sentences.insert(0, sent)
+                        overlap_len += sent_len
+                    else:
+                        break
+                current_chunk_sentences = overlap_sentences
+                current_len = overlap_len
 
             current_chunk_sentences.append(sentence)
             current_len += s_len
@@ -253,26 +334,67 @@ def chunk_sections(
     return all_chunks
 
 
-def save_chunks(chunks: List[Chunk], path: str):
-    """Save with Pydantic serialization."""
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        for c in chunks:
-            f.write(c.model_dump_json(by_alias=True) + "\n")
+def save_chunks(chunks: List[Chunk], path: str) -> None:
+    """
+    Save chunks to JSONL file with Pydantic serialization.
+    
+    Args:
+        chunks: List of Chunk objects
+        path: Output file path
+    """
+    try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            for c in chunks:
+                f.write(c.model_dump_json(by_alias=True) + "\n")
+        logger.info(f"✓ Saved {len(chunks)} chunks to {path}")
+    except Exception as e:
+        raise RuntimeError(f"Failed to save chunks: {e}") from e
 
 
 def load_chunks(path: str) -> List[Chunk]:
-    """Load and validate with Pydantic."""
-    chunks = []
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            if line.strip():
-                chunks.append(Chunk.model_validate_json(line))
-    return chunks
+    """
+    Load and validate chunks from JSONL file with Pydantic.
+    
+    Args:
+        path: Input file path
+        
+    Returns:
+        List of validated Chunk objects
+        
+    Raises:
+        FileNotFoundError: If file doesn't exist
+        RuntimeError: If validation fails
+    """
+    if not Path(path).exists():
+        raise FileNotFoundError(f"Chunks file not found: {path}")
+    
+    try:
+        chunks = []
+        with open(path, "r", encoding="utf-8") as f:
+            for line_num, line in enumerate(f, 1):
+                if line.strip():
+                    try:
+                        chunks.append(Chunk.model_validate_json(line))
+                    except Exception as e:
+                        logger.warning(f"Skipping invalid chunk at line {line_num}: {e}")
+        
+        logger.info(f"✓ Loaded {len(chunks)} chunks from {path}")
+        return chunks
+    except Exception as e:
+        raise RuntimeError(f"Failed to load chunks: {e}") from e
 
 
 def verify_chunks(chunks: List[Chunk]) -> Dict:
-    """Quality audit for the ingestion pipeline."""
+    """
+    Quality audit for the ingestion pipeline.
+    
+    Args:
+        chunks: List of Chunk objects to verify
+        
+    Returns:
+        Dictionary with statistics and validation results
+    """
     if not chunks:
         return {
             "total_chunks": 0,
@@ -310,11 +432,45 @@ def verify_chunks(chunks: List[Chunk]) -> Dict:
 
 
 def run_ingestion(pdf_path: str, output_path: str, **kwargs) -> Tuple[List[Chunk], Dict]:
-    """Hierarchical ingestion pipeline."""
-    logger.info(f"Ingesting: {pdf_path}")
-    pages = extract_pages(pdf_path)
-    sections = detect_sections(pages)
-    chunks = chunk_sections(sections, **kwargs)
-    save_chunks(chunks, output_path)
-    stats = verify_chunks(chunks)
-    return chunks, stats
+    """
+    Hierarchical ingestion pipeline with comprehensive error handling.
+    
+    Args:
+        pdf_path: Path to input PDF file
+        output_path: Path to output JSONL file
+        **kwargs: Additional arguments for chunk_sections
+        
+    Returns:
+        Tuple of (chunks list, statistics dict)
+        
+    Raises:
+        RuntimeError: If any pipeline stage fails
+    """
+    try:
+        logger.info("=" * 60)
+        logger.info(f"Starting PDF ingestion: {pdf_path}")
+        logger.info("=" * 60)
+        
+        pages = extract_pages(pdf_path)
+        sections = detect_sections(pages)
+        logger.info(f"✓ Detected {len(sections)} sections")
+        
+        chunks = chunk_sections(sections, **kwargs)
+        logger.info(f"✓ Created {len(chunks)} chunks")
+        
+        save_chunks(chunks, output_path)
+        stats = verify_chunks(chunks)
+        
+        logger.info("=" * 60)
+        logger.info("✓ Ingestion complete!")
+        logger.info(f"  Total chunks: {stats['total_chunks']}")
+        logger.info(f"  Sections: {stats['unique_sections']}")
+        logger.info(f"  Chapters: {stats['unique_chapters']}")
+        logger.info(f"  Page range: {stats['page_range']}")
+        logger.info("=" * 60)
+        
+        return chunks, stats
+        
+    except Exception as e:
+        logger.error(f"Ingestion failed: {e}", exc_info=True)
+        raise RuntimeError(f"PDF ingestion failed: {e}") from e

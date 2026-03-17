@@ -14,8 +14,10 @@ sentence-transformers>=2.5.0
 torch>=2.0.0
 transformers>=4.36.0
 
-# Vector Store
-faiss-cpu>=1.8.0
+# Vector Store (PostgreSQL + pgvector)
+psycopg2-binary>=2.9.9
+pgvector>=0.2.4
+sqlalchemy>=2.0.0
 numpy>=1.26.0
 
 # LLM Integration
