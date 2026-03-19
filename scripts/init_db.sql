@@ -9,17 +9,16 @@ CREATE TABLE IF NOT EXISTS document_chunks (
     id SERIAL PRIMARY KEY,
     chunk_id VARCHAR(32) UNIQUE NOT NULL,
     text TEXT NOT NULL,
-    embedding vector(384),  -- 384 dimensions for all-MiniLM-L6-v2
+    embedding vector(768),  -- 768 dimensions for balanced tier (BAAI/bge-base-en-v1.5)
     
     -- Metadata for citations
     section_id VARCHAR(50),
     chapter_id VARCHAR(50),
     section_title TEXT,
-    page_start INTEGER,
-    page_end INTEGER,
+    page_num INTEGER,
     
     -- Additional metadata
-    chunk_index_in_section INTEGER,
+    chunk_index INTEGER,
     char_count INTEGER,
     word_count INTEGER,
     

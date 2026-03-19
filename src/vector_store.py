@@ -99,6 +99,7 @@ class PgVectorStore:
             "database": os.environ.get("POSTGRES_DB",       database),
             "user":     os.environ.get("POSTGRES_USER",     user),
             "password": resolved_password,
+            "sslmode":  os.environ.get("POSTGRES_SSLMODE",  "require"),
         }
 
         try:
@@ -124,10 +125,8 @@ class PgVectorStore:
 
     def _verify_connection(self) -> None:
         """
-        Confirm the database is reachable and pgvector is installed.
-
-        Raises:
-            RuntimeError: On connection failure or missing extension.
+        Confirm the database is reachable, pgvector is installed,
+        and the chunks table exists (creates it if not).
         """
         try:
             with self._connection() as conn:
@@ -146,6 +145,8 @@ class PgVectorStore:
                     logger.info(
                         f"Connected to PostgreSQL — pgvector {row[0]}"
                     )
+            # Auto-create table if missing
+            self._ensure_table()
         except RuntimeError:
             raise
         except Exception as exc:
@@ -161,42 +162,69 @@ class PgVectorStore:
     @contextmanager
     def _connection(self) -> Generator:
         """
-        Yield a pooled connection with automatic commit / rollback and
-        exponential-backoff retry on transient errors.
-
-        Yields:
-            psycopg2 connection with pgvector types registered.
-
-        Raises:
-            Exception: After all retry attempts are exhausted.
+        Yield a pooled connection with automatic commit / rollback.
+        Retry logic is handled at the call site via _with_retry().
         """
-        max_retries = 3
-        delay = 1.0
-
-        for attempt in range(max_retries):
-            conn = None
-            try:
-                conn = self._pool.getconn()
-                register_vector(conn)
-                yield conn
-                conn.commit()
-                return
-            except Exception as exc:
-                if conn:
+        conn = None
+        try:
+            conn = self._pool.getconn()
+            register_vector(conn)
+            yield conn
+            conn.commit()
+        except Exception:
+            if conn:
+                try:
                     conn.rollback()
+                except Exception:
+                    pass
+            raise
+        finally:
+            if conn:
+                self._pool.putconn(conn)
+
+    def _with_retry(self, fn, *args, max_retries: int = 3, **kwargs):
+        """Call fn(*args, **kwargs) with exponential-backoff retry."""
+        delay = 1.0
+        last_exc: Optional[Exception] = None
+        for attempt in range(max_retries):
+            try:
+                return fn(*args, **kwargs)
+            except Exception as exc:
+                last_exc = exc
                 if attempt < max_retries - 1:
                     logger.warning(
-                        f"DB attempt {attempt + 1}/{max_retries} failed "
-                        f"({exc}). Retrying in {delay:.1f}s…"
+                        "DB attempt %d/%d failed (%s). Retrying in %.1fs…",
+                        attempt + 1, max_retries, exc, delay,
                     )
                     time.sleep(delay)
                     delay *= 2
-                else:
-                    logger.error("All DB retry attempts exhausted.")
-                    raise
-            finally:
-                if conn:
-                    self._pool.putconn(conn)
+        raise last_exc
+
+    def _ensure_table(self) -> None:
+        """Create the chunks table and pgvector extension if they don't exist."""
+        # pgvector can only index vector columns up to 2000d.
+        # For higher dims (e.g. nv-embed-v1 at 4096d), store as halfvec.
+        col_type = f"halfvec({self.embedding_dim})" if self.embedding_dim > 2000 else f"vector({self.embedding_dim})"
+        with self._connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+                cur.execute(f"""
+                    CREATE TABLE IF NOT EXISTS {self.table_name} (
+                        id            BIGSERIAL PRIMARY KEY,
+                        chunk_id      TEXT        NOT NULL UNIQUE,
+                        text          TEXT        NOT NULL,
+                        embedding     {col_type},
+                        section_id    TEXT,
+                        chapter_id    TEXT,
+                        section_title TEXT,
+                        page_num      INTEGER,
+                        chunk_index   INTEGER     DEFAULT 0,
+                        char_count    INTEGER     DEFAULT 0,
+                        word_count    INTEGER     DEFAULT 0,
+                        created_at    TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                        updated_at    TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
 
     # ------------------------------------------------------------------ #
     #  Public API                                                          #
@@ -259,31 +287,39 @@ class PgVectorStore:
 
         inserted = 0
         try:
-            with self._connection() as conn:
-                with conn.cursor() as cur:
-                    for i in range(0, len(chunks), batch_size):
-                        batch_c = chunks[i : i + batch_size]
-                        batch_e = embeddings[i : i + batch_size]
+            def _do_insert():
+                nonlocal inserted
+                with self._connection() as conn:
+                    with conn.cursor() as cur:
+                        for i in range(0, len(chunks), batch_size):
+                            batch_c = chunks[i : i + batch_size]
+                            batch_e = embeddings[i : i + batch_size]
 
-                        rows = [
-                            (
-                                _get(c, "chunk_id"),
-                                _get(c, "text"),
-                                batch_e[j].tolist(),
-                                _get(c, "section_id"),
-                                _get(c, "chapter_id"),
-                                _get(c, "section_title"),
-                                _get(c, "page_num"),
-                                _get(c, "chunk_index", 0),
-                                _get(c, "char_count", 0),
-                                _get(c, "word_count", 0),
-                            )
-                            for j, c in enumerate(batch_c)
-                        ]
+                            seen: dict = {}
+                            for j, c in enumerate(batch_c):
+                                seen[_get(c, "chunk_id")] = (c, batch_e[j])
 
-                        execute_values(cur, sql, rows)
-                        inserted += len(batch_c)
-                        logger.debug(f"  {inserted}/{len(chunks)} rows inserted")
+                            rows = [
+                                (
+                                    _get(c, "chunk_id"),
+                                    _get(c, "text"),
+                                    emb.tolist(),
+                                    _get(c, "section_id"),
+                                    _get(c, "chapter_id"),
+                                    _get(c, "section_title"),
+                                    _get(c, "page_num"),
+                                    _get(c, "chunk_index", 0),
+                                    _get(c, "char_count", 0),
+                                    _get(c, "word_count", 0),
+                                )
+                                for c, emb in seen.values()
+                            ]
+
+                            execute_values(cur, sql, rows)
+                            inserted += len(batch_c)
+                            logger.debug(f"  {inserted}/{len(chunks)} rows inserted")
+
+            self._with_retry(_do_insert)
 
             elapsed = time.time() - t0
             logger.info(
@@ -299,7 +335,7 @@ class PgVectorStore:
 
     def create_index(
         self,
-        index_type: str = "ivfflat",
+        index_type: str = "hnsw",
         lists: int = 100,
         m: int = 16,
         ef_construction: int = 64,
@@ -307,66 +343,72 @@ class PgVectorStore:
         """
         Build a vector similarity index on the embedding column.
 
-        For small datasets (<10 k rows) an index may not improve speed;
-        for large datasets it is essential.
-
-        Args:
-            index_type:      ``"ivfflat"`` (default) or ``"hnsw"``.
-            lists:           IVFFlat: number of inverted lists.
-                             Rule of thumb: ``rows / 1000`` (min 10).
-            m:               HNSW: max connections per layer.
-            ef_construction: HNSW: size of the dynamic candidate list
-                             during index construction.
-
-        Raises:
-            ValueError:   For unknown ``index_type``.
-            RuntimeError: On database error.
+        pgvector limits:
+          - vector/halfvec IVFFlat: max 2000d
+          - vector/halfvec HNSW:    max 4000d
+        nv-embed-v1 is 4096d — above both limits.
+        For >4000d we skip the ANN index; pgvector falls back to an exact
+        sequential scan which is perfectly fast for ~3k rows.
         """
-        logger.info(f"Building {index_type.upper()} index…")
+        # Hard limits in pgvector 0.8
+        HNSW_MAX = 4000
+        IVFFLAT_MAX = 2000
+
+        if index_type == "hnsw" and self.embedding_dim > HNSW_MAX:
+            logger.warning(
+                "Skipping HNSW index: embedding_dim=%d exceeds pgvector limit of %d. "
+                "Queries will use exact sequential scan (fine for <10k rows).",
+                self.embedding_dim, HNSW_MAX,
+            )
+            return
+
+        if index_type == "ivfflat" and self.embedding_dim > IVFFLAT_MAX:
+            logger.warning(
+                "Skipping IVFFlat index: embedding_dim=%d exceeds pgvector limit of %d. "
+                "Queries will use exact sequential scan (fine for <10k rows).",
+                self.embedding_dim, IVFFLAT_MAX,
+            )
+            return
+
+        logger.info(f"Building {index_type.upper()} index (dim={self.embedding_dim})…")
         t0 = time.time()
+        needs_halfvec = self.embedding_dim > 2000
 
         try:
             with self._connection() as conn:
                 with conn.cursor() as cur:
-                    # Remove any stale index first
-                    cur.execute(
-                        "DROP INDEX IF EXISTS idx_chunks_embedding_ivfflat"
-                    )
-                    cur.execute(
-                        "DROP INDEX IF EXISTS idx_chunks_embedding_hnsw"
-                    )
+                    cur.execute("DROP INDEX IF EXISTS idx_chunks_embedding_ivfflat")
+                    cur.execute("DROP INDEX IF EXISTS idx_chunks_embedding_hnsw")
 
-                    if index_type == "ivfflat":
-                        cur.execute(f"""
-                            CREATE INDEX idx_chunks_embedding_ivfflat
-                            ON {self.table_name}
-                            USING ivfflat (embedding vector_cosine_ops)
-                            WITH (lists = {lists})
-                        """)
-                    elif index_type == "hnsw":
+                    if index_type == "hnsw":
+                        ops = "halfvec_cosine_ops" if needs_halfvec else "vector_cosine_ops"
                         cur.execute(f"""
                             CREATE INDEX idx_chunks_embedding_hnsw
                             ON {self.table_name}
-                            USING hnsw (embedding vector_cosine_ops)
+                            USING hnsw (embedding {ops})
                             WITH (m = {m}, ef_construction = {ef_construction})
+                        """)
+                    elif index_type == "ivfflat":
+                        ops = "halfvec_cosine_ops" if needs_halfvec else "vector_cosine_ops"
+                        cur.execute(f"""
+                            CREATE INDEX idx_chunks_embedding_ivfflat
+                            ON {self.table_name}
+                            USING ivfflat (embedding {ops})
+                            WITH (lists = {lists})
                         """)
                     else:
                         raise ValueError(
                             f"Unknown index_type '{index_type}'. "
-                            "Choose 'ivfflat' or 'hnsw'."
+                            "Choose 'hnsw' or 'ivfflat'."
                         )
 
             elapsed = time.time() - t0
-            logger.info(
-                f"✓ {index_type.upper()} index created in {elapsed:.2f}s"
-            )
+            logger.info(f"✓ {index_type.upper()} index created in {elapsed:.2f}s")
 
         except ValueError:
             raise
         except Exception as exc:
-            raise RuntimeError(
-                f"create_index failed: {exc}"
-            ) from exc
+            raise RuntimeError(f"create_index failed: {exc}") from exc
 
     def search(
         self,
@@ -396,31 +438,42 @@ class PgVectorStore:
         """
         t0 = time.time()
         vec = query_embedding.tolist()
+        needs_halfvec = self.embedding_dim > 2000
 
         try:
             with self._connection() as conn:
                 with conn.cursor() as cur:
-                    cur.execute(f"SET ivfflat.probes = {probes}")
-
-                    cur.execute(
-                        f"""
-                        SELECT
-                            chunk_id,
-                            text,
-                            section_id,
-                            chapter_id,
-                            section_title,
-                            page_num,
-                            chunk_index,
-                            char_count,
-                            word_count,
-                            1 - (embedding <=> %s::vector) AS score
-                        FROM {self.table_name}
-                        ORDER BY embedding <=> %s::vector
-                        LIMIT %s
-                        """,
-                        (vec, vec, top_k),
-                    )
+                    if needs_halfvec:
+                        cur.execute(
+                            f"""
+                            SELECT
+                                chunk_id, text, section_id, chapter_id,
+                                section_title, page_num, chunk_index,
+                                char_count, word_count,
+                                1 - (embedding <=> %s::halfvec({self.embedding_dim})) AS score
+                            FROM {self.table_name}
+                            WHERE page_num < 620
+                            ORDER BY embedding <=> %s::halfvec({self.embedding_dim})
+                            LIMIT %s
+                            """,
+                            (vec, vec, top_k),
+                        )
+                    else:
+                        cur.execute(f"SET ivfflat.probes = {probes}")
+                        cur.execute(
+                            f"""
+                            SELECT
+                                chunk_id, text, section_id, chapter_id,
+                                section_title, page_num, chunk_index,
+                                char_count, word_count,
+                                1 - (embedding <=> %s::vector) AS score
+                            FROM {self.table_name}
+                            WHERE page_num < 620
+                            ORDER BY embedding <=> %s::vector
+                            LIMIT %s
+                            """,
+                            (vec, vec, top_k),
+                        )
 
                     results = [
                         {
