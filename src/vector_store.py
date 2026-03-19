@@ -452,7 +452,6 @@ class PgVectorStore:
                                 char_count, word_count,
                                 1 - (embedding <=> %s::halfvec({self.embedding_dim})) AS score
                             FROM {self.table_name}
-                            WHERE page_num < 620
                             ORDER BY embedding <=> %s::halfvec({self.embedding_dim})
                             LIMIT %s
                             """,
@@ -468,7 +467,6 @@ class PgVectorStore:
                                 char_count, word_count,
                                 1 - (embedding <=> %s::vector) AS score
                             FROM {self.table_name}
-                            WHERE page_num < 620
                             ORDER BY embedding <=> %s::vector
                             LIMIT %s
                             """,
