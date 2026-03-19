@@ -16,7 +16,7 @@ import re
 import json
 import hashlib
 import logging
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict
 from pydantic import BaseModel, Field, ConfigDict
@@ -266,7 +266,7 @@ def _chunk_single_section(
 ) -> List[Chunk]:
     """
     Chunk one SectionBlock into overlapping Chunk objects.
-    Module-level so ProcessPoolExecutor can pickle it.
+    Module-level so ThreadPoolExecutor can use it.
 
     Args:
         args: (section, chunk_size, chunk_overlap, min_chunk)
@@ -343,7 +343,7 @@ def chunk_sections(
 ) -> List[Chunk]:
     """
     Produce overlapping chunks with sentence-boundary awareness.
-    Parallelized across sections using ProcessPoolExecutor (CPU-bound).
+    Parallelized across sections using ThreadPoolExecutor.
 
     Args:
         sections:      List of SectionBlock objects.
@@ -365,8 +365,8 @@ def chunk_sections(
 
     args = [(s, chunk_size, chunk_overlap, min_chunk) for s in sections]
 
-    # ProcessPoolExecutor for CPU-bound regex/string work
-    with ProcessPoolExecutor() as executor:
+    # ThreadPoolExecutor (Windows-compatible, avoids spawn overhead)
+    with ThreadPoolExecutor() as executor:
         results = list(executor.map(_chunk_single_section, args))
 
     all_chunks = [chunk for section_chunks in results for chunk in section_chunks]
