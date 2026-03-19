@@ -101,7 +101,7 @@ class Generator:
                 "No LLM API key found. Set NVIDIA_API_KEY or GROQ_API_KEY in .env"
             )
 
-        # Primary provider
+        # Primary provider — NVIDIA, fallback to Groq
         if self._nvidia_valid:
             self._provider = "nvidia"
             self._url      = NVIDIA_URL
@@ -199,18 +199,41 @@ class Generator:
                     self._url,
                     headers=self._headers,
                     json=payload,
-                    timeout=60,
+                    timeout=120,
                 )
                 response.raise_for_status()
-                return self._parse_stream(response)
+                result = self._parse_stream(response)
+                if result:
+                    return result
+                # Stream returned empty — try non-streaming
+                logger.warning("Stream returned empty, retrying non-streaming")
+                ns_payload = {**payload, "stream": False}
+                response2 = requests.post(
+                    self._url,
+                    headers=self._headers,
+                    json=ns_payload,
+                    timeout=60,
+                )
+                response2.raise_for_status()
+                data = response2.json()
+                content = data["choices"][0]["message"].get("content") or ""
+                if content.strip():
+                    return content.strip()
             except Exception as exc:
                 last_error = exc
-                logger.warning(
-                    "%s attempt %d/%d failed: %s",
-                    self._provider, attempt, self.max_retries, exc,
-                )
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                wait = delay
+                if status == 429:
+                    retry_after = getattr(getattr(exc, "response", None), "headers", {}).get("Retry-After")
+                    wait = float(retry_after) if retry_after else 15.0
+                    logger.warning("%s 429 rate limit — waiting %.0fs", self._provider, wait)
+                else:
+                    logger.warning(
+                        "%s attempt %d/%d failed: %s",
+                        self._provider, attempt, self.max_retries, exc,
+                    )
                 if attempt < self.max_retries:
-                    time.sleep(delay)
+                    time.sleep(wait)
                     delay *= 2
 
         # Runtime fallback to Groq if NVIDIA was primary and Groq is available

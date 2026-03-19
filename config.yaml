@@ -42,9 +42,9 @@ retrieval:
   score_threshold: null  # Optional minimum similarity score
   rerank: false
 
-# Generation (NVIDIA API → Groq fallback)
+# Generation (NVIDIA primary → Groq fallback)
 generation:
-  model: "moonshotai/kimi-k2.5"
+  model: "meta/llama-3.3-70b-instruct"
   temperature: 0.3
   max_tokens: 512
   top_p: 0.9
