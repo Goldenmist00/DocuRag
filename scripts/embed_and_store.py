@@ -155,7 +155,7 @@ def main():
             port=pg.get("port", 5432),
             database=pg.get("database", "rag_db"),
             user=pg.get("user", "postgres"),
-            password=pg.get("password", "postgres"),
+            password=pg.get("password", ""),
         )
         
         logger.info(f"✓ Connected to PostgreSQL")
