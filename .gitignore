@@ -16,13 +16,15 @@ embeddings/
 vector_store/
 models/
 outputs/
+!data/queries.json
 
 # Environment — never commit secrets
 .env
 *.env
 
-# All markdown docs
+# All markdown docs except README
 *.md
+!README.md
 
 # PDFs at root
 *.pdf
