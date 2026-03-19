@@ -128,7 +128,7 @@ def main():
         logger.info("=" * 70)
         
         start_time = time.time()
-        texts = [chunk["text"] for chunk in chunks]
+        texts = [chunk.text for chunk in chunks]
         embeddings = embedder.embed_batch(texts, batch_size=32, show_progress=True)
         embed_time = time.time() - start_time
         
@@ -147,14 +147,15 @@ def main():
         logger.info("\n" + "=" * 70)
         logger.info("STEP 4: Connecting to PostgreSQL")
         logger.info("=" * 70)
-        
+
+        pg = cfg.get("vector_store", {}).get("connection", {})
         vector_store = PgVectorStore(
             embedding_dim=embedder.embedding_dim,
-            host=cfg.get("postgres", {}).get("host", "localhost"),
-            port=cfg.get("postgres", {}).get("port", 5432),
-            database=cfg.get("postgres", {}).get("database", "rag_db"),
-            user=cfg.get("postgres", {}).get("user", "rag_user"),
-            password=cfg.get("postgres", {}).get("password", "rag_password")
+            host=pg.get("host", "localhost"),
+            port=pg.get("port", 5432),
+            database=pg.get("database", "rag_db"),
+            user=pg.get("user", "postgres"),
+            password=pg.get("password", "postgres"),
         )
         
         logger.info(f"✓ Connected to PostgreSQL")

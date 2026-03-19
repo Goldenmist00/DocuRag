@@ -8,7 +8,13 @@ import logging
 import sys
 from pathlib import Path
 
+import numpy as np
 import yaml
+from dotenv import load_dotenv
+
+# Load .env from project root regardless of cwd
+_ROOT = Path(__file__).parent.parent
+load_dotenv(_ROOT / ".env")
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -16,15 +22,21 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.pdf_processor import run_ingestion, load_chunks, verify_chunks
 from src.embedder import Embedder, EmbeddingTier
 from src.vector_store import PgVectorStore
+from src.retriever import create_retriever
+from src.generator import Generator
+
 
 def setup_logging():
-    """Configure logging."""
+    """Configure logging with UTF-8 stream handler for Windows compatibility."""
+    import sys
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[
-            logging.FileHandler('logs/rag_system.log'),
-            logging.StreamHandler()
+            logging.FileHandler('logs/rag_system.log', encoding='utf-8'),
+            logging.StreamHandler(
+                stream=open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1, closefd=False)
+            ),
         ]
     )
     return logging.getLogger(__name__)
@@ -75,7 +87,7 @@ def run_embed(logger):
     
     # Get paths and settings
     chunks_path = cfg.get("cache", {}).get("processed_chunks_path", "data/processed/chunks.jsonl")
-    tier_name = cfg.get("embeddings", {}).get("default_tier", "balanced")
+    tier_name = cfg.get("embedding", {}).get("tier", "balanced")
     cache_dir = cfg.get("cache", {}).get("embeddings_cache", "embeddings/cache")
     
     # Map tier name to enum
@@ -94,8 +106,8 @@ def run_embed(logger):
     embedder = Embedder(tier=tier, cache_dir=cache_dir)
     logger.info(f"  Using {embedder.model_name} ({embedder.embedding_dim}d)")
     
-    # Generate embeddings
-    texts = [chunk["text"] for chunk in chunks]
+    # Generate embeddings — load_chunks() returns Pydantic objects
+    texts = [chunk.text for chunk in chunks]
     embeddings = embedder.embed_batch(texts, batch_size=32, show_progress=True)
     
     stats = embedder.get_stats()
@@ -121,34 +133,29 @@ def run_index(logger, chunks=None, embeddings=None, embedding_dim=None):
         chunks_path = cfg.get("cache", {}).get("processed_chunks_path", "data/processed/chunks.jsonl")
         chunks = load_chunks(chunks_path)
         
-        # Need to regenerate embeddings
-        tier_name = cfg.get("embeddings", {}).get("default_tier", "balanced")
-        tier_map = {
-            "fast": EmbeddingTier.FAST,
-            "balanced": EmbeddingTier.BALANCED,
-            "deep": EmbeddingTier.DEEP
-        }
-        embedder = Embedder(tier=tier_map.get(tier_name, EmbeddingTier.BALANCED))
-        texts = [chunk["text"] for chunk in chunks]
-        embeddings = embedder.embed_batch(texts, batch_size=32, show_progress=False)
+        cache_dir = cfg.get("cache", {}).get("embeddings_cache", "embeddings/cache")
+        embedder = Embedder(cache_dir=cache_dir)
+        texts = [chunk.text for chunk in chunks]
+        embeddings = embedder.embed_batch(texts, show_progress=True, use_cache=True)
         embedding_dim = embedder.embedding_dim
-    
-    # Connect to PostgreSQL
+
+    # Connect to PostgreSQL — config path: vector_store.connection
+    pg = cfg.get("vector_store", {}).get("connection", {})
     vector_store = PgVectorStore(
         embedding_dim=embedding_dim,
-        host=cfg.get("postgres", {}).get("host", "localhost"),
-        port=cfg.get("postgres", {}).get("port", 5432),
-        database=cfg.get("postgres", {}).get("database", "rag_db"),
-        user=cfg.get("postgres", {}).get("user", "rag_user"),
-        password=cfg.get("postgres", {}).get("password", "rag_password")
+        host=pg.get("host", "localhost"),
+        port=pg.get("port", 5432),
+        database=pg.get("database", "rag_db"),
+        user=pg.get("user", "postgres"),
+        password=pg.get("password", "postgres"),
     )
     
     # Insert vectors
     vector_store.insert_chunks(chunks, embeddings)
     logger.info(f"  Inserted {len(chunks)} vectors")
     
-    # Create index
-    vector_store.create_index(index_type="ivfflat")
+    # Create index — IVFFlat max is 2000d, use HNSW for 4096d
+    vector_store.create_index(index_type="hnsw")
     logger.info(f"  Created IVFFlat index")
     
     # Show stats
@@ -159,40 +166,135 @@ def run_index(logger, chunks=None, embeddings=None, embedding_dim=None):
     
     vector_store.close()
 
+def run_load(logger):
+    """Load chunks + cached embeddings directly into DB — skips NVIDIA API entirely."""
+    logger.info("Step: Loading from cache into PostgreSQL (no API calls)...")
+
+    cfg_path = Path("config.yaml")
+    cfg = {}
+    if cfg_path.exists():
+        with open(cfg_path) as f:
+            cfg = yaml.safe_load(f) or {}
+
+    chunks_path = cfg.get("cache", {}).get("processed_chunks_path", "data/processed/chunks.jsonl")
+    cache_dir   = Path(cfg.get("cache", {}).get("embeddings_cache", "embeddings/cache"))
+    cache_file  = cache_dir / "embeddings_cache.npz"
+
+    if not Path(chunks_path).exists():
+        raise FileNotFoundError(f"Chunks file not found: {chunks_path} — run --step extract first")
+    if not cache_file.exists():
+        raise FileNotFoundError(f"Embeddings cache not found: {cache_file} — run --step embed first")
+
+    chunks = load_chunks(chunks_path)
+    logger.info("  Loaded %d chunks", len(chunks))
+
+    # Load cache and match to chunks by SHA-256 hash (same key used by Embedder)
+    import hashlib as _hashlib
+    store = dict(np.load(cache_file, allow_pickle=False))
+    logger.info("  Cache contains %d embeddings", len(store))
+
+    def _hash(text: str) -> str:
+        return _hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    embeddings_list = []
+    missing = []
+    for chunk in chunks:
+        h = _hash(chunk.text)
+        if h in store:
+            embeddings_list.append(store[h])
+        else:
+            missing.append(chunk.chunk_id)
+
+    if missing:
+        raise RuntimeError(
+            f"{len(missing)} chunks have no cached embedding. "
+            "Run --step embed first to populate the cache."
+        )
+
+    embeddings = np.vstack(embeddings_list)
+    embedding_dim = embeddings.shape[1]
+    logger.info("  Embeddings shape: %s (dim=%d)", embeddings.shape, embedding_dim)
+
+    pg = cfg.get("vector_store", {}).get("connection", {})
+    vector_store = PgVectorStore(
+        embedding_dim=embedding_dim,
+        host=pg.get("host", "localhost"),
+        port=pg.get("port", 5432),
+        database=pg.get("database", "rag_db"),
+        user=pg.get("user", "postgres"),
+        password=pg.get("password", "postgres"),
+    )
+
+    vector_store.insert_chunks(chunks, embeddings)
+    logger.info("  Inserted %d vectors", len(chunks))
+
+    vector_store.create_index(index_type="hnsw")
+
+    stats = vector_store.get_stats()
+    logger.info("✓ Vector store ready — %d chunks, %d pages", stats["total_chunks"], stats["unique_pages"])
+    vector_store.close()
+
+
 def run_generate(logger):
-    """Run Q&A generation."""
+    """Run Q&A generation — delegates to generate_submission logic."""
     logger.info("Step 4: Generating answers...")
-    # TODO: Import and call retriever + generator
-    logger.info("✓ Answer generation complete")
+
+    import os
+    sys.path.insert(0, str(Path(__file__).parent))
+    from generate_submission import load_config, load_queries, build_components, run, QUERIES_PATH
+
+    cfg     = load_config()
+    queries = load_queries(QUERIES_PATH)
+
+    nvidia_key   = os.getenv("NVIDIA_API_KEY", "").strip()
+    groq_key     = os.getenv("GROQ_API_KEY",   "").strip()
+    nvidia_ready = bool(nvidia_key and nvidia_key != "your_nvidia_api_key_here")
+    dry_run      = not nvidia_ready and not groq_key
+
+    if dry_run:
+        logger.warning("No LLM provider configured — running retrieval-only dry-run")
+
+    retriever, _ = build_components(cfg)
+
+    generator = None
+    if not dry_run:
+        from src.generator import Generator
+        gen_cfg = cfg.get("generation", {})
+        generator = Generator(
+            model=gen_cfg.get("model") or None,
+            temperature=gen_cfg.get("temperature", 1.0),
+            max_tokens=gen_cfg.get("max_tokens", 4096),
+            top_p=gen_cfg.get("top_p", 1.0),
+        )
+
+    output_path = Path("outputs/submission.csv")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    run(queries=queries, retriever=retriever, generator=generator,
+        output_path=output_path, dry_run=dry_run)
+
+    retriever.vector_store.close()
+    logger.info("Answer generation complete — output: %s", output_path)
+
 
 def main():
     parser = argparse.ArgumentParser(description="RAG Pipeline Orchestration")
     parser.add_argument(
         "--step",
-        choices=["extract", "embed", "index", "generate"],
+        choices=["extract", "embed", "index", "load", "generate"],
         help="Run specific pipeline step"
     )
-    parser.add_argument(
-        "--all",
-        action="store_true",
-        help="Run all pipeline steps"
-    )
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Force recomputation (ignore cache)"
-    )
-    
+    parser.add_argument("--all", action="store_true", help="Run all pipeline steps")
+    parser.add_argument("--force", action="store_true", help="Force recomputation (ignore cache)")
     args = parser.parse_args()
-    
-    # Setup
+
     Path("logs").mkdir(exist_ok=True)
     logger = setup_logging()
-    
+
     logger.info("=" * 60)
     logger.info("RAG Pipeline Starting")
     logger.info("=" * 60)
-    
+
     try:
         if args.all:
             run_extract(logger)
@@ -205,17 +307,18 @@ def main():
             run_embed(logger)
         elif args.step == "index":
             run_index(logger)
+        elif args.step == "load":
+            run_load(logger)
         elif args.step == "generate":
             run_generate(logger)
         else:
             parser.print_help()
             return
-        
+
         logger.info("=" * 60)
         logger.info("Pipeline completed successfully!")
-        logger.info("Output: outputs/submission.csv")
         logger.info("=" * 60)
-        
+
     except Exception as e:
         logger.error(f"Pipeline failed: {e}", exc_info=True)
         sys.exit(1)

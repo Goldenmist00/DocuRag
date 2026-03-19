@@ -9,17 +9,23 @@ env/
 ENV/
 .venv
 
-# Data
+# Data & embeddings
 data/raw/*.pdf
 data/processed/
-embeddings/cache/
-vector_store/faiss_index/
-models/sentence-transformers/
-outputs/*.csv
+embeddings/
+vector_store/
+models/
+outputs/
 
-# Environment
+# Environment — never commit secrets
 .env
-.env.example
+*.env
+
+# All markdown docs
+*.md
+
+# PDFs at root
+*.pdf
 
 # IDE
 .vscode/
@@ -43,9 +49,5 @@ logs/
 
 # Docker
 .dockerignore
-
-# Skills files
-SKILLS.md
-
-# Docs
-README.md
+docker-compose*.yml
+Dockerfile*
