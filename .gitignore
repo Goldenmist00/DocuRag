@@ -36,6 +36,14 @@ outputs/
 *.swo
 .DS_Store
 
+# Next.js build output
+.next/
+**/.next/
+
+# Node modules
+node_modules/
+**/node_modules/
+
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb

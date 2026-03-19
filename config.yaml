@@ -42,7 +42,7 @@ retrieval:
   score_threshold: null  # Optional minimum similarity score
   rerank: false
 
-# Generation (NVIDIA API → Groq fallback)
+# Generation (NVIDIA primary → Groq fallback)
 generation:
   model: "meta/llama-3.3-70b-instruct"  # Best for RAG - good quality + rate limits
   temperature: 0.3
