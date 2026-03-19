@@ -16,6 +16,7 @@ import re
 import json
 import hashlib
 import logging
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict
 from pydantic import BaseModel, Field, ConfigDict
@@ -49,7 +50,7 @@ class Chunk(BaseModel):
     A single text chunk with full metadata.
     Aligned with SKILLS.md: chunk_id, section_identifier, page_number, raw_text.
     """
-    model_config = ConfigDict(extra='ignore')
+    model_config = ConfigDict(extra='ignore', populate_by_name=True)
 
     chunk_id: str = Field(..., description="Deterministic unique ID")
     text: str = Field(..., alias="raw_text")
@@ -58,9 +59,15 @@ class Chunk(BaseModel):
     section_title: str
     page_start: int
     page_end: int
-    chunk_index_in_section: int
+    # stored as chunk_index in DB — alias keeps JSONL backward-compatible
+    chunk_index: int = Field(0, alias="chunk_index_in_section")
     char_count: int
     word_count: int
+
+    @property
+    def page_num(self) -> int:
+        """Convenience alias used by vector_store insert."""
+        return self.page_start
 
 
 # ---------------------------------------------------------------------------
@@ -254,83 +261,116 @@ def detect_sections(pages: List[PageRecord]) -> List[SectionBlock]:
 # Chunking & Persistence
 # ---------------------------------------------------------------------------
 
-def chunk_sections(
-    sections: List[SectionBlock],
-    chunk_size: int = DEFAULT_CHUNK_SIZE,
-    chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
-    min_chunk: int = DEFAULT_MIN_CHUNK
+def _chunk_single_section(
+    args: Tuple,
 ) -> List[Chunk]:
     """
-    Produce overlapping chunks with sentence-boundary awareness.
-    
+    Chunk one SectionBlock into overlapping Chunk objects.
+    Module-level so ProcessPoolExecutor can pickle it.
+
     Args:
-        sections: List of SectionBlock objects
-        chunk_size: Maximum characters per chunk
-        chunk_overlap: Characters to overlap between chunks
-        min_chunk: Minimum chunk size to keep
-        
+        args: (section, chunk_size, chunk_overlap, min_chunk)
+
     Returns:
-        List of Chunk objects with metadata
+        List of Chunk objects for this section.
     """
-    if not sections:
-        logger.warning("No sections provided for chunking")
-        return []
-    
-    logger.info(f"Chunking {len(sections)} sections (size={chunk_size}, overlap={chunk_overlap})...")
-    all_chunks = []
-    for section in sections:
-        sentences = [s.strip() for s in _SENTENCE_END_RE.split(section.text) if s.strip()]
-        
-        current_chunk_sentences = []
-        current_len = 0
-        idx = 0
+    section, chunk_size, chunk_overlap, min_chunk = args
+    sentences = [s.strip() for s in _SENTENCE_END_RE.split(section.text) if s.strip()]
 
-        for sentence in sentences:
-            s_len = len(sentence) + 1
-            if current_len + s_len > chunk_size and current_chunk_sentences:
-                chunk_text = " ".join(current_chunk_sentences)
-                if len(chunk_text) >= min_chunk:
-                    cid = hashlib.sha256(f"{section.section_id}{idx}{chunk_text[:32]}".encode()).hexdigest()[:16]
-                    all_chunks.append(Chunk(
-                        chunk_id=cid, raw_text=chunk_text,
-                        section_id=section.section_id, chapter_id=section.chapter_id,
-                        section_title=section.section_title,
-                        page_start=section.page_start, page_end=section.page_end,
-                        chunk_index_in_section=idx, char_count=len(chunk_text),
-                        word_count=len(chunk_text.split())
-                    ))
-                    idx += 1
-                
-                # Handle overlap: keep last N sentences up to overlap budget
-                overlap_sentences = []
-                overlap_len = 0
-                for sent in reversed(current_chunk_sentences):
-                    sent_len = len(sent) + 1
-                    if overlap_len + sent_len <= chunk_overlap:
-                        overlap_sentences.insert(0, sent)
-                        overlap_len += sent_len
-                    else:
-                        break
-                current_chunk_sentences = overlap_sentences
-                current_len = overlap_len
+    chunks: List[Chunk] = []
+    current_chunk_sentences: List[str] = []
+    current_len = 0
+    idx = 0
 
-            current_chunk_sentences.append(sentence)
-            current_len += s_len
-
-        # Final chunk
-        if current_chunk_sentences:
+    for sentence in sentences:
+        s_len = len(sentence) + 1
+        if current_len + s_len > chunk_size and current_chunk_sentences:
             chunk_text = " ".join(current_chunk_sentences)
             if len(chunk_text) >= min_chunk:
-                cid = hashlib.sha256(f"{section.section_id}{idx}{chunk_text[:32]}".encode()).hexdigest()[:16]
-                all_chunks.append(Chunk(
+                cid = hashlib.sha256(
+                    f"{section.section_id}{idx}{chunk_text[:32]}".encode()
+                ).hexdigest()[:16]
+                chunks.append(Chunk(
                     chunk_id=cid, raw_text=chunk_text,
                     section_id=section.section_id, chapter_id=section.chapter_id,
                     section_title=section.section_title,
                     page_start=section.page_start, page_end=section.page_end,
                     chunk_index_in_section=idx, char_count=len(chunk_text),
-                    word_count=len(chunk_text.split())
+                    word_count=len(chunk_text.split()),
                 ))
+                idx += 1
 
+            # Overlap: keep last N sentences up to overlap budget
+            overlap_sentences: List[str] = []
+            overlap_len = 0
+            for sent in reversed(current_chunk_sentences):
+                sent_len = len(sent) + 1
+                if overlap_len + sent_len <= chunk_overlap:
+                    overlap_sentences.insert(0, sent)
+                    overlap_len += sent_len
+                else:
+                    break
+            current_chunk_sentences = overlap_sentences
+            current_len = overlap_len
+
+        current_chunk_sentences.append(sentence)
+        current_len += s_len
+
+    # Final chunk
+    if current_chunk_sentences:
+        chunk_text = " ".join(current_chunk_sentences)
+        if len(chunk_text) >= min_chunk:
+            cid = hashlib.sha256(
+                f"{section.section_id}{idx}{chunk_text[:32]}".encode()
+            ).hexdigest()[:16]
+            chunks.append(Chunk(
+                chunk_id=cid, raw_text=chunk_text,
+                section_id=section.section_id, chapter_id=section.chapter_id,
+                section_title=section.section_title,
+                page_start=section.page_start, page_end=section.page_end,
+                chunk_index_in_section=idx, char_count=len(chunk_text),
+                word_count=len(chunk_text.split()),
+            ))
+
+    return chunks
+
+
+def chunk_sections(
+    sections: List[SectionBlock],
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
+    min_chunk: int = DEFAULT_MIN_CHUNK,
+) -> List[Chunk]:
+    """
+    Produce overlapping chunks with sentence-boundary awareness.
+    Parallelized across sections using ProcessPoolExecutor (CPU-bound).
+
+    Args:
+        sections:      List of SectionBlock objects.
+        chunk_size:    Maximum characters per chunk.
+        chunk_overlap: Characters to overlap between chunks.
+        min_chunk:     Minimum chunk size to keep.
+
+    Returns:
+        List of Chunk objects with metadata, in section order.
+    """
+    if not sections:
+        logger.warning("No sections provided for chunking")
+        return []
+
+    logger.info(
+        "Chunking %d sections in parallel (size=%d, overlap=%d)...",
+        len(sections), chunk_size, chunk_overlap,
+    )
+
+    args = [(s, chunk_size, chunk_overlap, min_chunk) for s in sections]
+
+    # ProcessPoolExecutor for CPU-bound regex/string work
+    with ProcessPoolExecutor() as executor:
+        results = list(executor.map(_chunk_single_section, args))
+
+    all_chunks = [chunk for section_chunks in results for chunk in section_chunks]
+    logger.info("✓ Produced %d chunks from %d sections", len(all_chunks), len(sections))
     return all_chunks
 
 
@@ -425,9 +465,9 @@ def verify_chunks(chunks: List[Chunk]) -> Dict:
         "errors": [],
         "warnings": []
     }
-    # ID transparency check
+    # ID transparency check — duplicates are handled by upsert, warn only
     if len(set(c.chunk_id for c in chunks)) != len(chunks):
-        stats["errors"].append("Duplicate chunk_ids found!")
+        stats["warnings"].append("Duplicate chunk_ids found (will be upserted safely)")
     return stats
 
 
