@@ -1,0 +1,396 @@
+﻿@import 'tailwindcss';
+
+@theme inline {
+  --color-background: #0a0a10;
+  --color-foreground: rgba(255, 255, 255, 0.95);
+  --color-primary: #7352DD;
+  --color-accent: #A78BFA;
+  --color-border: rgba(255, 255, 255, 0.08);
+  --font-sans: var(--font-inria), 'Inria Sans', sans-serif;
+}
+
+:root {
+  --background: #0a0a10;
+  --foreground: rgba(255, 255, 255, 0.95);
+  --primary: #7352DD;
+  --accent: #A78BFA;
+  --border: rgba(255, 255, 255, 0.08);
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+html, body {
+  min-height: 100%;
+  background: var(--background);
+  color: white;
+  font-family: var(--font-inria), 'Inria Sans', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+/* ── Focus ring ── */
+:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.35);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* ── Input placeholder ── */
+input::placeholder,
+textarea::placeholder {
+  color: rgba(255, 255, 255, 0.2);
+}
+
+/* ── Autofill override ── */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 100px #1b1b1f inset;
+  -webkit-text-fill-color: white;
+  caret-color: white;
+}
+
+/* ── Spin animation ── */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+@keyframes ping {
+  75%, 100% { transform: scale(2); opacity: 0; }
+}
+
+/* ── Dot pulse animation (chat loading) ── */
+@keyframes dotPulse {
+  0%, 80%, 100% { opacity: 0.2; transform: scale(0.8); }
+  40%           { opacity: 1;   transform: scale(1); }
+}
+
+/* alias used in dashboard */
+@keyframes blink {
+  0%, 80%, 100% { opacity: 0.2; }
+  40%           { opacity: 1; }
+}
+
+.dot { animation: dotPulse 1.2s ease-in-out infinite; }
+.dot-0 { animation-delay: 0s; }
+.dot-1 { animation-delay: 0.2s; }
+.dot-2 { animation-delay: 0.4s; }
+
+/* ── Feature card stagger entrance ── */
+@keyframes cardEntrance {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.feature-card {
+  animation: cardEntrance 0.5s ease-out both;
+}
+.feature-card:nth-child(1) { animation-delay: 0.05s; }
+.feature-card:nth-child(2) { animation-delay: 0.12s; }
+.feature-card:nth-child(3) { animation-delay: 0.19s; }
+.feature-card:nth-child(4) { animation-delay: 0.26s; }
+.feature-card:nth-child(5) { animation-delay: 0.33s; }
+.feature-card:nth-child(6) { animation-delay: 0.40s; }
+
+/* ── Respect reduced motion ── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ── Shared hover utilities ── */
+.action-btn:hover {
+  border-color: #333 !important;
+  color: rgba(255, 255, 255, 0.85) !important;
+}
+
+.source-row:hover {
+  background: #111 !important;
+}
+
+.back-btn:hover {
+  color: rgba(255, 255, 255, 0.8) !important;
+}
+
+.studio-tool:hover {
+  border-color: #2a2a2a !important;
+  background: #111 !important;
+  color: rgba(255, 255, 255, 0.9) !important;
+}
+
+.suggestion-btn:hover {
+  border-color: #333 !important;
+  color: rgba(255, 255, 255, 0.7) !important;
+}
+
+.nav-item:hover {
+  background: #111 !important;
+  color: rgba(255, 255, 255, 0.8) !important;
+}
+
+.book-card:hover {
+  border-color: #333 !important;
+  background: #111 !important;
+}
+
+.new-book-btn:hover {
+  background: #f0f0f0 !important;
+  border-color: transparent !important;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(255,255,255,0.15);
+}
+
+/* ── Dashboard dropdown ── */
+.dropdown-item:hover {
+  background: #1a1a1a !important;
+  color: white !important;
+}
+
+/* ── Creating notebook overlay ── */
+@keyframes overlayFadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes iconPulse {
+  0%, 100% { opacity: 0.6; transform: scale(0.97); }
+  50%       { opacity: 1;   transform: scale(1); }
+}
+
+@keyframes orbitPulse {
+  0%, 100% { opacity: 0.3; transform: scale(0.7); }
+  50%       { opacity: 1;   transform: scale(1); }
+}
+
+@keyframes lineReveal {
+  from { opacity: 0; transform: scaleX(0); transform-origin: left; }
+  to   { opacity: 1; transform: scaleX(1); transform-origin: left; }
+}
+
+/* ── Studio view transitions ── */
+@keyframes studioFadeUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.studio-view-enter {
+  animation: studioFadeUp 0.18s ease both;
+}
+
+/* ── Studio card generation shimmer ── */
+@keyframes shimmerSweep {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(200%); }
+}
+
+@keyframes generatingPulse {
+  0%, 100% { opacity: 0.5; }
+  50%       { opacity: 1; }
+}
+
+/* ── Generated section skeleton bar ── */
+@keyframes skeletonBar {
+  0%   { left: -40%; width: 30%; }
+  50%  { left: 40%;  width: 50%; }
+  100% { left: 110%; width: 30%; }
+}
+
+@keyframes skeletonGlow {
+  0%, 100% { opacity: 0.3; }
+  50%       { opacity: 0.7; }
+}
+
+/* ── Studio result preview fade in ── */
+@keyframes resultReveal {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.studio-result-enter {
+  animation: resultReveal 0.25s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* ── Generated row tap ── */
+@keyframes resultTap {
+  0%   { transform: scale(1); }
+  40%  { transform: scale(0.97); }
+  100% { transform: scale(1); }
+}
+
+/* ── Landing page section background orbs ── */
+@keyframes orbDrift1 {
+  0%   { transform: translate(0px,   0px)   scale(1); }
+  33%  { transform: translate(40px, -30px)  scale(1.1); }
+  66%  { transform: translate(-20px, 20px)  scale(0.95); }
+  100% { transform: translate(0px,   0px)   scale(1); }
+}
+
+@keyframes orbDrift2 {
+  0%   { transform: translate(0px,  0px)   scale(1); }
+  40%  { transform: translate(-50px, 30px) scale(1.08); }
+  70%  { transform: translate(30px, -20px) scale(0.92); }
+  100% { transform: translate(0px,  0px)   scale(1); }
+}
+
+@keyframes orbDrift3 {
+  0%   { transform: translateX(-50%) scale(1);    opacity: 0.7; }
+  50%  { transform: translateX(-50%) scale(1.25); opacity: 1; }
+  100% { transform: translateX(-50%) scale(1);    opacity: 0.7; }
+}
+
+/* ── Landing page card flowing gradient ── */
+@keyframes gradientFlow1 {
+  0%   { transform: translateX(0%)   translateY(0%)  rotate(0deg);   opacity: 0.85; }
+  25%  { transform: translateX(-12%) translateY(-6%) rotate(6deg);   opacity: 1; }
+  50%  { transform: translateX(8%)   translateY(4%)  rotate(-4deg);  opacity: 0.9; }
+  75%  { transform: translateX(-6%)  translateY(3%)  rotate(3deg);   opacity: 1; }
+  100% { transform: translateX(0%)   translateY(0%)  rotate(0deg);   opacity: 0.85; }
+}
+
+@keyframes gradientFlow2 {
+  0%   { transform: translateX(0%)   translateY(0%)  rotate(0deg);   opacity: 0.85; }
+  25%  { transform: translateX(14%)  translateY(7%)  rotate(-7deg);  opacity: 0.7; }
+  50%  { transform: translateX(-10%) translateY(-5%) rotate(5deg);   opacity: 1; }
+  75%  { transform: translateX(8%)   translateY(3%)  rotate(-3deg);  opacity: 0.8; }
+  100% { transform: translateX(0%)   translateY(0%)  rotate(0deg);   opacity: 0.85; }
+}
+
+@keyframes gradientFlow3 {
+  0%   { transform: translateX(0%)   scale(1);    opacity: 0.85; }
+  30%  { transform: translateX(-18%) scale(1.12); opacity: 1; }
+  60%  { transform: translateX(12%)  scale(0.92); opacity: 0.75; }
+  100% { transform: translateX(0%)   scale(1);    opacity: 0.85; }
+}
+
+@keyframes gradientFlow4 {
+  0%   { opacity: 0.2; transform: scaleX(0.75) scaleY(0.9); }
+  40%  { opacity: 1;   transform: scaleX(1.15) scaleY(1.1); }
+  70%  { opacity: 0.6; transform: scaleX(0.95) scaleY(1.0); }
+  100% { opacity: 0.2; transform: scaleX(0.75) scaleY(0.9); }
+}
+@keyframes fsOverlayIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes fsOverlayOut {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+@keyframes fsPanelIn {
+  from { opacity: 0; transform: scale(0.97) translateY(10px); }
+  to   { opacity: 1; transform: scale(1)    translateY(0); }
+}
+@keyframes fsPanelOut {
+  from { opacity: 1; transform: scale(1)    translateY(0); }
+  to   { opacity: 0; transform: scale(0.97) translateY(10px); }
+}
+
+.fs-overlay-enter { animation: fsOverlayIn  0.28s cubic-bezier(0.22,1,0.36,1) both; }
+.fs-overlay-exit  { animation: fsOverlayOut 0.22s cubic-bezier(0.55,0,1,0.45) both; }
+.fs-panel-enter   { animation: fsPanelIn    0.32s cubic-bezier(0.22,1,0.36,1) both; }
+.fs-panel-exit    { animation: fsPanelOut   0.22s cubic-bezier(0.55,0,1,0.45) both; }
+
+/* ── MindSync page transition (Try MindSync click) ── */
+@keyframes msTransitionIn {
+  0%   { opacity: 0; }
+  20%  { opacity: 1; }
+  100% { opacity: 1; }
+}
+
+@keyframes msRingExpand {
+  0%   { transform: scale(0.2); opacity: 0; }
+  40%  { opacity: 1; }
+  100% { transform: scale(3.5); opacity: 0; }
+}
+
+@keyframes msLogoIn {
+  0%   { opacity: 0; transform: scale(0.7); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+/* ── Marquee scroll animations ── */
+@keyframes marqueeScroll {
+  0%   { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+
+@keyframes marqueeScrollRev {
+  0%   { transform: translateX(-50%); }
+  100% { transform: translateX(0); }
+}
+
+/* ── Scroll progress bar shimmer ── */
+@keyframes shimmerBar {
+  0%   { background-position: 200% center; }
+  100% { background-position: -200% center; }
+}
+
+/* ── Gradient text utility ── */
+.gradient-text-purple {
+  background: linear-gradient(135deg, #C084FC 0%, #A78BFA 35%, #7352DD 65%, #818CF8 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  color: transparent;
+  display: inline;
+}
+
+/* ── Feature reveal on active change ── */
+@keyframes featureReveal {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Hero entrance ── */
+@keyframes heroFadeUp {
+  from { opacity: 0; transform: translateY(28px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Scroll hint chevron bounce ── */
+@keyframes chevronBounce {
+  0%, 100% { transform: translateY(0);   opacity: 0.7; }
+  50%       { transform: translateY(5px); opacity: 1; }
+}
+
+/* ── Scroll hint pulse (legacy) ── */
+@keyframes scrollHintPulse {
+  0%, 100% { opacity: 0.3; transform: scaleY(0.8); }
+  50%       { opacity: 1;   transform: scaleY(1); }
+}
+
