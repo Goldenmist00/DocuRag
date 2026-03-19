@@ -202,7 +202,24 @@ class Generator:
                     timeout=60,
                 )
                 response.raise_for_status()
-                return self._parse_stream(response)
+                result = self._parse_stream(response)
+                # Add delay after successful request to avoid rate limits
+                time.sleep(0.5)
+                return result
+            except requests.exceptions.HTTPError as exc:
+                # Handle rate limit errors (429) with longer backoff
+                if exc.response.status_code == 429:
+                    backoff = delay * 3  # Longer wait for rate limits
+                    logger.warning(
+                        "%s rate limit hit (attempt %d/%d) — waiting %.1fs",
+                        self._provider, attempt, self.max_retries, backoff,
+                    )
+                    if attempt < self.max_retries:
+                        time.sleep(backoff)
+                        delay *= 2
+                    last_error = exc
+                else:
+                    raise
             except Exception as exc:
                 last_error = exc
                 logger.warning(
