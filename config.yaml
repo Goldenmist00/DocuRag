@@ -44,7 +44,7 @@ retrieval:
 
 # Generation (NVIDIA primary → Groq fallback)
 generation:
-  model: "meta/llama-3.3-70b-instruct"
+  model: "meta/llama-3.3-70b-instruct"  # Best for RAG - good quality + rate limits
   temperature: 0.3
   max_tokens: 512
   top_p: 0.9

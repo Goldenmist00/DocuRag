@@ -463,7 +463,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--workers",
         type=int,
-        default=4,
+        default=1,  # Reduced to 1 to avoid rate limits
         help="Parallel worker threads for generation (default: 4)",
     )
     parser.add_argument(

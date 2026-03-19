@@ -203,22 +203,23 @@ class Generator:
                 )
                 response.raise_for_status()
                 result = self._parse_stream(response)
-                if result:
-                    return result
-                # Stream returned empty — try non-streaming
-                logger.warning("Stream returned empty, retrying non-streaming")
-                ns_payload = {**payload, "stream": False}
-                response2 = requests.post(
-                    self._url,
-                    headers=self._headers,
-                    json=ns_payload,
-                    timeout=60,
-                )
-                response2.raise_for_status()
-                data = response2.json()
-                content = data["choices"][0]["message"].get("content") or ""
-                if content.strip():
-                    return content.strip()
+                # Add delay after successful request to avoid rate limits
+                time.sleep(0.5)
+                return result
+            except requests.exceptions.HTTPError as exc:
+                # Handle rate limit errors (429) with longer backoff
+                if exc.response.status_code == 429:
+                    backoff = delay * 3  # Longer wait for rate limits
+                    logger.warning(
+                        "%s rate limit hit (attempt %d/%d) — waiting %.1fs",
+                        self._provider, attempt, self.max_retries, backoff,
+                    )
+                    if attempt < self.max_retries:
+                        time.sleep(backoff)
+                        delay *= 2
+                    last_error = exc
+                else:
+                    raise
             except Exception as exc:
                 last_error = exc
                 status = getattr(getattr(exc, "response", None), "status_code", None)
