@@ -147,7 +147,7 @@ def run_index(logger, chunks=None, embeddings=None, embedding_dim=None):
         port=pg.get("port", 5432),
         database=pg.get("database", "rag_db"),
         user=pg.get("user", "postgres"),
-        password=pg.get("password", "postgres"),
+        password=pg.get("password", ""),
     )
     
     # Insert vectors
@@ -222,7 +222,7 @@ def run_load(logger):
         port=pg.get("port", 5432),
         database=pg.get("database", "rag_db"),
         user=pg.get("user", "postgres"),
-        password=pg.get("password", "postgres"),
+        password=pg.get("password", ""),
     )
 
     vector_store.insert_chunks(chunks, embeddings)
