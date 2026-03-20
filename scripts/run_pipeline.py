@@ -156,7 +156,7 @@ def run_index(logger, chunks=None, embeddings=None, embedding_dim=None):
     
     # Create index — IVFFlat max is 2000d, use HNSW for 4096d
     vector_store.create_index(index_type="hnsw")
-    logger.info(f"  Created IVFFlat index")
+    logger.info(f"  Created HNSW index")
     
     # Show stats
     stats = vector_store.get_stats()
