@@ -1,22 +1,14 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { listNotebooks, createNotebook, deleteNotebook, updateNotebookTitle, type Notebook } from '@/lib/api';
+import { useToast } from '@/components/ui/toast';
 
 type Book = {
-  id: string; title: string; date: string; sources: number; tag: string;
+  id: string; title: string; date: string; sources: number;
 };
-
-const BOOKS: Book[] = [
-  { id: '1', title: 'Machine Learning Fundamentals', date: 'Mar 15, 2026', sources: 8,  tag: 'AI & ML' },
-  { id: '2', title: 'Quantum Physics Research',      date: 'Mar 12, 2026', sources: 12, tag: 'Physics' },
-  { id: '3', title: 'Data Structures & Algorithms',  date: 'Mar 8, 2026',  sources: 6,  tag: 'CS' },
-  { id: '4', title: 'Biochemistry Notes',            date: 'Mar 5, 2026',  sources: 15, tag: 'Biology' },
-  { id: '5', title: 'Financial Markets Analysis',    date: 'Mar 1, 2026',  sources: 11, tag: 'Finance' },
-  { id: '6', title: 'Psychology of Learning',        date: 'Feb 25, 2026', sources: 7,  tag: 'Psych' },
-  { id: '7', title: 'Climate Change Research',       date: 'Feb 20, 2026', sources: 20, tag: 'Science' },
-];
 
 /* ── Loading overlay (shared for create + open) ── */
 function LoadingOverlay({ visible, mode }: { visible: boolean; mode: 'create' | 'open' }) {
@@ -120,10 +112,12 @@ function NoteIcon({ size = 20 }: { size?: number }) {  return (
   );
 }
 
-function BookCard({ book, view, openMenu, setOpenMenu, onOpen }: {
+function BookCard({ book, view, openMenu, setOpenMenu, onOpen, onDelete, onRename }: {
   book: Book; view: 'grid' | 'list';
   openMenu: string | null; setOpenMenu: (id: string | null) => void;
   onOpen: (id: string) => void;
+  onDelete: (id: string) => void;
+  onRename: (id: string) => void;
 }) {
   const [hovered, setHovered] = useState(false);
 
@@ -151,7 +145,6 @@ function BookCard({ book, view, openMenu, setOpenMenu, onOpen }: {
           transition: 'border-color 0.15s ease, background 0.15s ease',
           minWidth: 0,
         }}>
-          {/* Grid: top row with icon + 3-dot */}
           {view === 'grid' && (
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
               <NoteIcon />
@@ -164,21 +157,16 @@ function BookCard({ book, view, openMenu, setOpenMenu, onOpen }: {
             </div>
           )}
 
-          {/* Grid text block */}
           {view === 'grid' ? (
             <div style={{ width: '100%' }}>
               <p style={{ fontSize: 13, fontWeight: 500, color: hovered ? '#fff' : 'rgba(255,255,255,0.8)', margin: '0 0 10px', lineHeight: 1.45, overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', letterSpacing: '-0.01em' }}>
                 {book.title}
               </p>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span style={{ fontSize: 11, fontWeight: 500, padding: '2px 8px', borderRadius: 4, background: '#1a1a1a', color: 'rgba(255,255,255,0.4)', border: '1px solid #2a2a2a' }}>
-                  {book.tag}
-                </span>
                 <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)' }}>{book.sources} sources</span>
               </div>
             </div>
           ) : (
-            /* List row */
             <>
               <NoteIcon />
               <div style={{ flex: 1, minWidth: 0 }}>
@@ -187,9 +175,6 @@ function BookCard({ book, view, openMenu, setOpenMenu, onOpen }: {
                 </p>
                 <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)', margin: '3px 0 0' }}>{book.date}</p>
               </div>
-              <span style={{ fontSize: 11, fontWeight: 500, padding: '2px 8px', borderRadius: 4, flexShrink: 0, background: '#1a1a1a', color: 'rgba(255,255,255,0.4)', border: '1px solid #2a2a2a' }}>
-                {book.tag}
-              </span>
               <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)', flexShrink: 0, minWidth: 64, textAlign: 'right' }}>
                 {book.sources} sources
               </span>
@@ -204,26 +189,21 @@ function BookCard({ book, view, openMenu, setOpenMenu, onOpen }: {
         </div>
       </div>
 
-      {/* Dropdown */}
       {openMenu === book.id && (
         <div style={{ position: 'absolute', top: view === 'grid' ? 42 : 36, right: 8, zIndex: 100, background: '#111', border: '1px solid #222', borderRadius: 8, padding: 4, boxShadow: '0 8px 24px rgba(0,0,0,0.5)', minWidth: 140 }}>
-          {[
-            { label: 'Rename',    icon: 'M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z' },
-            { label: 'Duplicate', icon: 'M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z' },
-            { label: 'Delete',    icon: 'M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16' },
-          ].map(({ label, icon }) => (
-            <DropdownItem key={label} label={label} icon={icon} isDelete={label === 'Delete'} />
-          ))}
+          <DropdownItem label="Rename" icon="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" onClick={() => { setOpenMenu(null); onRename(book.id); }} />
+          <DropdownItem label="Delete" icon="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" isDelete onClick={() => onDelete(book.id)} />
         </div>
       )}
     </div>
   );
 }
 
-function DropdownItem({ label, icon, isDelete }: { label: string; icon: string; isDelete?: boolean }) {
+function DropdownItem({ label, icon, isDelete, onClick }: { label: string; icon: string; isDelete?: boolean; onClick?: () => void }) {
   const [hov, setHov] = useState(false);
   return (
     <button onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
+      onClick={e => { e.preventDefault(); e.stopPropagation(); onClick?.(); }}
       style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', textAlign: 'left', background: hov ? '#1a1a1a' : 'none', border: 'none', cursor: 'pointer', padding: '7px 10px', fontSize: 12, color: isDelete ? (hov ? '#f87171' : '#ef4444') : (hov ? '#fff' : 'rgba(255,255,255,0.6)'), borderRadius: 6, fontFamily: 'inherit', transition: 'all 0.1s' }}>
       <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d={icon} />
@@ -235,6 +215,8 @@ function DropdownItem({ label, icon, isDelete }: { label: string; icon: string; 
 
 export default function BooksPage() {
   const router = useRouter();
+  const [books, setBooks]       = useState<Book[]>([]);
+  const [loading, setLoading]   = useState(true);
   const [search, setSearch]     = useState('');
   const [view, setView]         = useState<'grid' | 'list'>('grid');
   const [sort, setSort]         = useState<'recent' | 'alpha' | 'sources'>('recent');
@@ -244,6 +226,7 @@ export default function BooksPage() {
   const [searchFocused, setSearchFocused] = useState(false);
   const [creating, setCreating] = useState(false);
   const [opening, setOpening]   = useState(false);
+  const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null);
 
   const SORT_OPTIONS: { key: typeof sort; label: string }[] = [
     { key: 'recent',  label: 'Most recent' },
@@ -251,23 +234,78 @@ export default function BooksPage() {
     { key: 'sources', label: 'Most sources' },
   ];
 
-  const handleCreate = (e: React.MouseEvent) => {
+  const fetchBooks = useCallback(async () => {
+    try {
+      const nbs = await listNotebooks();
+      setBooks(nbs.map(nb => ({
+        id: nb.id,
+        title: nb.title,
+        date: nb.updated_at ? new Date(nb.updated_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '',
+        sources: nb.source_count ?? 0,
+      })));
+    } catch {
+      /* API may not be running yet — keep empty list */
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { fetchBooks(); }, [fetchBooks]);
+
+  const { success: toastSuccess, error: toastError } = useToast();
+
+  const handleCreate = async (e: React.MouseEvent) => {
     e.preventDefault();
     setCreating(true);
-    setTimeout(() => router.push('/dashboard?new=1'), 1400);
+    try {
+      const nb = await createNotebook();
+      toastSuccess('Notebook created');
+      router.push(`/dashboard?notebook=${nb.id}`);
+    } catch {
+      toastError('Failed to create notebook');
+      setCreating(false);
+    }
   };
 
   const handleOpen = (id: string) => {
     setOpening(true);
-    setTimeout(() => router.push(`/dashboard?book=${id}`), 1100);
+    setTimeout(() => router.push(`/dashboard?notebook=${id}`), 400);
   };
 
-  const filtered = BOOKS
+  const handleDelete = async (id: string) => {
+    const name = books.find(b => b.id === id)?.title ?? 'Notebook';
+    try {
+      await deleteNotebook(id);
+      setBooks(prev => prev.filter(b => b.id !== id));
+      setOpenMenu(null);
+      toastSuccess(`"${name}" deleted`);
+    } catch {
+      toastError(`Failed to delete "${name}"`);
+    }
+  };
+
+  const handleRenameStart = (id: string) => {
+    const book = books.find(b => b.id === id);
+    if (book) setRenaming({ id, title: book.title });
+  };
+
+  const handleRenameSubmit = async () => {
+    if (!renaming || !renaming.title.trim()) return;
+    try {
+      await updateNotebookTitle(renaming.id, renaming.title.trim());
+      setBooks(prev => prev.map(b => b.id === renaming.id ? { ...b, title: renaming.title.trim() } : b));
+      toastSuccess('Notebook renamed');
+    } catch {
+      toastError('Failed to rename notebook');
+    }
+    setRenaming(null);
+  };
+
+  const filtered = books
     .filter(b => b.title.toLowerCase().includes(search.toLowerCase()))
     .sort((a, b) => {
       if (sort === 'alpha')   return a.title.localeCompare(b.title);
       if (sort === 'sources') return b.sources - a.sources;
-      // 'recent' — sort by date descending (parse date string)
       return new Date(b.date).getTime() - new Date(a.date).getTime();
     });
 
@@ -404,10 +442,68 @@ export default function BooksPage() {
         <div style={view === 'grid' ? { display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 } : { display: 'flex', flexDirection: 'column', gap: 6 }}>
           <CreateCard view={view} onCreate={handleCreate} />
           {filtered.map(book => (
-            <BookCard key={book.id} book={book} view={view} openMenu={openMenu} setOpenMenu={setOpenMenu} onOpen={handleOpen} />
+            <BookCard key={book.id} book={book} view={view} openMenu={openMenu} setOpenMenu={setOpenMenu} onOpen={handleOpen} onDelete={handleDelete} onRename={handleRenameStart} />
           ))}
         </div>
       </main>
+
+      {/* Rename modal */}
+      {renaming && (
+        <div
+          onClick={() => setRenaming(null)}
+          style={{
+            position: 'fixed', inset: 0, zIndex: 9000,
+            background: 'rgba(0,0,0,0.45)', backdropFilter: 'blur(2px)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              width: 380, background: '#0a0a0a', border: '1px solid #222',
+              borderRadius: 12, padding: '22px 24px', boxShadow: '0 24px 60px rgba(0,0,0,0.6)',
+              display: 'flex', flexDirection: 'column', gap: 16,
+            }}
+          >
+            <p style={{ fontSize: 14, fontWeight: 600, color: 'rgba(255,255,255,0.9)', margin: 0 }}>
+              Rename notebook
+            </p>
+            <input
+              autoFocus
+              value={renaming.title}
+              onChange={e => setRenaming({ ...renaming, title: e.target.value })}
+              onKeyDown={e => { if (e.key === 'Enter') handleRenameSubmit(); if (e.key === 'Escape') setRenaming(null); }}
+              style={{
+                width: '100%', padding: '9px 12px', borderRadius: 6,
+                background: '#111', border: '1px solid #2a2a2a', outline: 'none',
+                color: '#fff', fontSize: 13, fontFamily: 'inherit',
+              }}
+            />
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button
+                onClick={() => setRenaming(null)}
+                style={{
+                  padding: '7px 14px', borderRadius: 6, border: '1px solid #2a2a2a',
+                  background: 'transparent', color: 'rgba(255,255,255,0.5)',
+                  fontSize: 12, fontFamily: 'inherit', cursor: 'pointer',
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleRenameSubmit}
+                style={{
+                  padding: '7px 14px', borderRadius: 6, border: 'none',
+                  background: '#fff', color: '#000',
+                  fontSize: 12, fontWeight: 600, fontFamily: 'inherit', cursor: 'pointer',
+                }}
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
