@@ -415,6 +415,7 @@ class PgVectorStore:
         top_k: int = 10,
         probes: int = 10,
         notebook_id: Optional[str] = None,
+        source_id: Optional[str] = None,
     ) -> List[Dict]:
         """
         Retrieve the ``top_k`` most similar chunks via cosine similarity.
@@ -425,12 +426,14 @@ class PgVectorStore:
             probes:          IVFFlat search probes (higher = more accurate,
                              slower).  Ignored when using HNSW.
             notebook_id:     If provided, restrict to this notebook's chunks.
+            source_id:       If provided, restrict to this source's chunks.
 
         Returns:
             List of result dicts, each containing::
 
                 chunk_id, text, section_id, chapter_id, section_title,
-                page_num, chunk_index, char_count, word_count, score
+                page_num, chunk_index, char_count, word_count,
+                source_id, score
 
             Sorted by ``score`` descending (most similar first).
 
@@ -441,11 +444,15 @@ class PgVectorStore:
         vec = query_embedding.tolist()
         needs_halfvec = self.embedding_dim > 2000
 
-        where_clause = ""
+        conditions: list = []
         extra_params: list = []
         if notebook_id:
-            where_clause = "WHERE notebook_id = %s"
-            extra_params = [notebook_id]
+            conditions.append("notebook_id = %s")
+            extra_params.append(notebook_id)
+        if source_id:
+            conditions.append("source_id = %s")
+            extra_params.append(source_id)
+        where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
         try:
             with self._connection() as conn:
@@ -456,7 +463,7 @@ class PgVectorStore:
                             SELECT
                                 chunk_id, text, section_id, chapter_id,
                                 section_title, page_num, chunk_index,
-                                char_count, word_count,
+                                char_count, word_count, source_id,
                                 1 - (embedding <=> %s::halfvec({self.embedding_dim})) AS score
                             FROM {self.table_name}
                             {where_clause}
@@ -472,7 +479,7 @@ class PgVectorStore:
                             SELECT
                                 chunk_id, text, section_id, chapter_id,
                                 section_title, page_num, chunk_index,
-                                char_count, word_count,
+                                char_count, word_count, source_id,
                                 1 - (embedding <=> %s::vector) AS score
                             FROM {self.table_name}
                             {where_clause}
@@ -493,7 +500,8 @@ class PgVectorStore:
                             "chunk_index":   row[6],
                             "char_count":    row[7],
                             "word_count":    row[8],
-                            "score":         float(row[9]),
+                            "source_id":     str(row[9]) if row[9] else None,
+                            "score":         float(row[10]),
                         }
                         for row in cur.fetchall()
                     ]
