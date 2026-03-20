@@ -55,6 +55,7 @@ from src.generator import Generator
 from src.retriever import Retriever, RetrievedChunk, create_retriever
 from src.vector_store import PgVectorStore
 from src.services import notebook_service, source_service
+from services import summaryService, quizService, mindMapService, flashcardService
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +142,30 @@ class TextSourceCreate(BaseModel):
     """Request body for POST /notebooks/{id}/sources/text."""
     name: Optional[str] = "Pasted text"
     text: str = Field(..., min_length=1)
+
+
+class FlashcardsRequest(BaseModel):
+    """Request body for POST /flashcards."""
+    text: str = Field(..., min_length=10)
+    count: int = Field(10, ge=1, le=50)
+
+
+class SummaryRequest(BaseModel):
+    """Request body for POST /summary."""
+    text: str = Field(..., min_length=10)
+    level: str = Field("medium", pattern="^(short|medium|detailed)$")
+
+
+class MindMapRequest(BaseModel):
+    """Request body for POST /mindmap."""
+    text: str = Field(..., min_length=10)
+
+
+class QuizRequest(BaseModel):
+    """Request body for POST /quiz."""
+    text: str = Field(..., min_length=10)
+    count: int = Field(10, ge=1, le=50)
+    difficulty: str = Field("mixed", pattern="^(easy|medium|hard|mixed)$")
 
 
 # ---------------------------------------------------------------------------
@@ -448,6 +473,50 @@ async def notebook_query(notebook_id: str, request: QueryRequest) -> QueryRespon
         raise HTTPException(status_code=404, detail=str(exc))
 
     return _run_query(request, notebook_id=notebook_id)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  STUDIO ENDPOINTS (flashcards, summary, mindmap, quiz)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.post("/flashcards", summary="Generate flashcards")
+async def generate_flashcards(body: FlashcardsRequest):
+    """Generate flashcards from provided text using Gemini."""
+    try:
+        cards = flashcardService.generate_flashcards(body.text, body.count)
+        return {"flashcards": cards}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Flashcard generation failed: {exc}")
+
+
+@app.post("/summary", summary="Generate summary")
+async def generate_summary(body: SummaryRequest):
+    """Generate a summary from provided text using Gemini."""
+    try:
+        summary = summaryService.generate_summary(body.text, body.level)
+        return {"summary": summary, "level": body.level}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Summary generation failed: {exc}")
+
+
+@app.post("/mindmap", summary="Generate mind map")
+async def generate_mind_map(body: MindMapRequest):
+    """Generate a mind map structure from provided text using Gemini."""
+    try:
+        data = mindMapService.generate_mind_map(body.text)
+        return data
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Mind map generation failed: {exc}")
+
+
+@app.post("/quiz", summary="Generate quiz")
+async def generate_quiz(body: QuizRequest):
+    """Generate quiz questions from provided text using Gemini."""
+    try:
+        questions = quizService.generate_quiz(body.text, body.count, body.difficulty)
+        return {"questions": questions}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Quiz generation failed: {exc}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
