@@ -22,13 +22,14 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from src.db import source_db, chunk_db, notebook_db
+from src.db import source_db, chunk_db, notebook_db, chunk_graph_db
 from src.pdf_processor import (
     SectionBlock,
     extract_pages,
     detect_sections,
 )
 from src.embedder import Embedder, EmbeddingTier
+from src.services.entity_extractor import build_graph_edges
 
 logger = logging.getLogger(__name__)
 
@@ -270,6 +271,9 @@ def process_source(source_id: str) -> None:
         inserted = _stream_embed_and_store(
             chunk_dicts, embedder, notebook_id, source_id,
         )
+
+        _set_status(source_id, "graphing")
+        _build_chunk_graph(chunk_dicts, notebook_id, source_id)
 
         source_db.update_source(source_id, status="ready", chunk_count=inserted)
         logger.info("Source %s ready — %d chunks stored", source_id, inserted)
@@ -736,6 +740,43 @@ def _extract_json_sections(file_path: str, source_name: str) -> List[SectionBloc
 
     logger.info("JSON source '%s' produced %d sections", source_name, len(sections))
     return sections
+
+
+def _build_chunk_graph(
+    chunk_dicts: List[Dict],
+    notebook_id: str,
+    source_id: str,
+) -> None:
+    """
+    Build knowledge graph edges between chunks for multi-hop retrieval.
+
+    Uses fast regex-based entity extraction and keyword overlap to
+    detect cross-page relationships without LLM calls.
+
+    Args:
+        chunk_dicts: List of chunk dicts from the chunking stage.
+        notebook_id: Parent notebook UUID.
+        source_id:   Parent source UUID.
+    """
+    if len(chunk_dicts) < 2:
+        logger.info("Source %s has <2 chunks — skipping graph build", source_id)
+        return
+
+    try:
+        edges = build_graph_edges(chunk_dicts, notebook_id)
+        if edges:
+            inserted = chunk_graph_db.insert_edges(edges)
+            logger.info(
+                "Source %s: built %d graph edges (%d inserted)",
+                source_id, len(edges), inserted,
+            )
+        else:
+            logger.info("Source %s: no graph edges found", source_id)
+    except Exception as exc:
+        logger.warning(
+            "Graph building failed for source %s (non-fatal): %s",
+            source_id, exc,
+        )
 
 
 def _chunk_text(chunk) -> str:
