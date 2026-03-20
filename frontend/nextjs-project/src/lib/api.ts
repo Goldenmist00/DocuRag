@@ -7,6 +7,7 @@ export interface Source {
   section_title: string;
   page: number;
   score: number;
+  source_name: string;
 }
 
 export interface QueryResponse {
