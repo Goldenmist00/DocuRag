@@ -62,6 +62,17 @@ Answer (cite sources with [1], [2], etc.):"""
 
 
 @dataclass
+class AnswerGradeResult:
+    """Quality grade returned alongside the answer."""
+    faithfulness: float = 0.0
+    completeness: float = 0.0
+    citation_accuracy: float = 0.0
+    overall: float = 0.0
+    passed: bool = True
+    issues: List[str] = field(default_factory=list)
+
+
+@dataclass
 class AnswerResult:
     question: str
     answer: str
@@ -69,6 +80,7 @@ class AnswerResult:
     model: str = ""
     latency_ms: float = 0.0
     chunks_used: int = 0
+    grade: Optional[AnswerGradeResult] = None
 
 
 
@@ -140,7 +152,27 @@ class Generator:
 
     # ------------------------------------------------------------------
 
-    def generate(self, question: str, chunks: List[RetrievedChunk]) -> AnswerResult:
+    def generate(
+        self,
+        question: str,
+        chunks: List[RetrievedChunk],
+        validator=None,
+    ) -> AnswerResult:
+        """
+        Generate an answer from retrieved chunks, optionally validating quality.
+
+        When a validator is provided, the answer is graded. If it fails,
+        a single retry is attempted with corrective feedback appended
+        to the prompt. The best attempt is returned.
+
+        Args:
+            question:  User's question.
+            chunks:    Retrieved context chunks.
+            validator: Optional AnswerValidator instance.
+
+        Returns:
+            AnswerResult with answer, citations, and optional grade.
+        """
         if not chunks:
             return AnswerResult(
                 question=question,
@@ -149,21 +181,68 @@ class Generator:
             )
 
         context = self._build_context(chunks)
-        prompt  = USER_TEMPLATE.format(context=context, question=question)
+        prompt = USER_TEMPLATE.format(context=context, question=question)
 
         t0 = time.time()
         answer_text = self._call_api(prompt)
-        latency_ms  = (time.time() - t0) * 1000
+        latency_ms = (time.time() - t0) * 1000
 
         citations = self._extract_citations(answer_text, chunks)
+        grade_result: Optional[AnswerGradeResult] = None
+
+        if validator and hasattr(validator, "grade") and validator.available:
+            from src.services.answer_validator import AnswerGrade
+
+            grade: AnswerGrade = validator.grade(question, answer_text, chunks)
+            grade_result = AnswerGradeResult(
+                faithfulness=grade.faithfulness,
+                completeness=grade.completeness,
+                citation_accuracy=grade.citation_accuracy,
+                overall=grade.overall,
+                passed=grade.passed,
+                issues=grade.issues,
+            )
+
+            if not grade.passed and grade.feedback:
+                logger.info(
+                    "Answer failed validation (%.2f) — retrying with feedback",
+                    grade.overall,
+                )
+                retry_prompt = (
+                    prompt
+                    + f"\n\n[QUALITY FEEDBACK: {grade.feedback}]\n\n"
+                    "Please provide an improved answer addressing the feedback above:"
+                )
+                t1 = time.time()
+                retry_text = self._call_api(retry_prompt)
+                latency_ms += (time.time() - t1) * 1000
+
+                retry_grade: AnswerGrade = validator.grade(question, retry_text, chunks)
+
+                if retry_grade.overall >= grade.overall:
+                    answer_text = retry_text
+                    citations = self._extract_citations(answer_text, chunks)
+                    grade_result = AnswerGradeResult(
+                        faithfulness=retry_grade.faithfulness,
+                        completeness=retry_grade.completeness,
+                        citation_accuracy=retry_grade.citation_accuracy,
+                        overall=retry_grade.overall,
+                        passed=retry_grade.passed,
+                        issues=retry_grade.issues,
+                    )
+                    logger.info(
+                        "Retry improved score: %.2f → %.2f",
+                        grade.overall, retry_grade.overall,
+                    )
 
         return AnswerResult(
             question=question,
             answer=answer_text,
             citations=citations,
             model=self.model,
-            latency_ms=latency_ms,
+            latency_ms=round(latency_ms, 1),
             chunks_used=len(chunks),
+            grade=grade_result,
         )
 
     # ------------------------------------------------------------------

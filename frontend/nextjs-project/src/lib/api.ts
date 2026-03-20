@@ -10,6 +10,15 @@ export interface Source {
   source_name: string;
 }
 
+export interface AnswerGrade {
+  faithfulness: number;
+  completeness: number;
+  citation_accuracy: number;
+  overall: number;
+  passed: boolean;
+  issues: string[];
+}
+
 export interface QueryResponse {
   question: string;
   answer: string;
@@ -17,6 +26,7 @@ export interface QueryResponse {
   chunks_used: number;
   latency_ms: number;
   sources: Source[];
+  grade?: AnswerGrade | null;
 }
 
 export interface Notebook {
@@ -210,6 +220,58 @@ export async function askQuestion(
     if (!res.ok) {
       const detail = await res.text();
       throw new Error(`API error ${res.status}: ${detail}`);
+    }
+    return res.json();
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// ─── Batch Q&A from file ───
+
+export interface BatchQueryResult {
+  question: string;
+  answer: string | null;
+  error: string | null;
+  sources: Source[];
+  grade: AnswerGrade | null;
+  latency_ms: number;
+}
+
+export interface BatchQueryResponse {
+  results: BatchQueryResult[];
+  total_questions: number;
+  answered: number;
+  failed: number;
+  total_latency_ms: number;
+}
+
+/**
+ * Upload a JSON or PDF file containing questions and get answers for each.
+ * @param notebookId - Parent notebook UUID
+ * @param file - JSON or PDF file with questions
+ * @param topK - Number of chunks per question (default 5)
+ * @returns Batch response with individual question results
+ */
+export async function batchQueryFromFile(
+  notebookId: string,
+  file: File,
+  topK = 5
+): Promise<BatchQueryResponse> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 600_000);
+
+  const form = new FormData();
+  form.append("file", file);
+
+  try {
+    const res = await fetch(
+      `${API_BASE}/notebooks/${notebookId}/batch-query?top_k=${topK}`,
+      { method: "POST", body: form, signal: controller.signal }
+    );
+    if (!res.ok) {
+      const detail = await res.text();
+      throw new Error(`Batch query failed: ${detail}`);
     }
     return res.json();
   } finally {
