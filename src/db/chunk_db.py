@@ -234,6 +234,7 @@ def search(
 
     with get_connection() as conn:
         with conn.cursor() as cur:
+            cur.execute("SET LOCAL hnsw.ef_search = 100")
             cur.execute(sql, params)
             results = [
                 {
@@ -254,6 +255,57 @@ def search(
     elapsed = (time.time() - t0) * 1000
     logger.info("Scoped search returned %d results in %.1fms (notebook=%s)", len(results), elapsed, notebook_id)
     return results
+
+
+_HNSW_INDEX_NAME = "idx_chunks_embedding_hnsw"
+_HNSW_M = 16
+_HNSW_EF_CONSTRUCTION = 200
+
+
+def ensure_hnsw_index() -> None:
+    """
+    Create an HNSW cosine-similarity index on the embedding column
+    if one does not already exist.
+
+    pgvector HNSW supports up to 4000 dimensions; our 1024d embeddings
+    are well within this limit.  The index is maintained automatically
+    on INSERT/UPDATE so it only needs to be created once.
+
+    Raises:
+        RuntimeError: If the index creation query fails.
+    """
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1 FROM pg_indexes
+                WHERE tablename = %s AND indexname = %s
+                """,
+                (TABLE, _HNSW_INDEX_NAME),
+            )
+            if cur.fetchone():
+                logger.info("HNSW index '%s' already exists — skipping creation", _HNSW_INDEX_NAME)
+                return
+
+    logger.info(
+        "Creating HNSW index '%s' on %s.embedding (dim=%d, m=%d, ef_construction=%d)…",
+        _HNSW_INDEX_NAME, TABLE, EMBEDDING_DIM, _HNSW_M, _HNSW_EF_CONSTRUCTION,
+    )
+    t0 = time.time()
+
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"""
+                    CREATE INDEX {_HNSW_INDEX_NAME}
+                    ON {TABLE}
+                    USING hnsw (embedding vector_cosine_ops)
+                    WITH (m = {_HNSW_M}, ef_construction = {_HNSW_EF_CONSTRUCTION})
+                """)
+        elapsed = time.time() - t0
+        logger.info("HNSW index created in %.2fs", elapsed)
+    except Exception as exc:
+        raise RuntimeError(f"HNSW index creation failed: {exc}") from exc
 
 
 def delete_by_source(source_id: str) -> int:

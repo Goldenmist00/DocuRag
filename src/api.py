@@ -46,6 +46,7 @@ from fastapi import (
     status,
 )
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 load_dotenv()
@@ -54,7 +55,8 @@ from src.embedder import Embedder, EmbeddingTier
 from src.generator import Generator
 from src.retriever import Retriever, RetrievedChunk, create_retriever
 from src.vector_store import PgVectorStore
-from src.services import notebook_service, source_service
+from src.services import notebook_service, source_service, podcast_service
+from src.db import podcast_db, chunk_db
 from services import summaryService, quizService, mindMapService, flashcardService
 
 logger = logging.getLogger(__name__)
@@ -217,6 +219,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
 
     _state.embedder = embedder
     source_service.set_embedder(embedder)
+
+    podcast_db.ensure_table()
+    chunk_db.ensure_hnsw_index()
 
     _state.source_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="source")
 
@@ -517,6 +522,102 @@ async def generate_quiz(body: QuizRequest):
         return {"questions": questions}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Quiz generation failed: {exc}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  PODCAST ENDPOINTS
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.post(
+    "/notebooks/{notebook_id}/podcast",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Generate podcast",
+)
+async def create_podcast(notebook_id: str):
+    """
+    Trigger podcast generation from this notebook's sources.
+
+    Retrieves key content, generates a two-host conversational
+    transcript via LLM, synthesizes speech with TTS, and assembles
+    a single audio file. Processing runs in a background thread.
+    Poll GET .../podcast to track status.
+    """
+    if _state.retriever is None or _state.generator is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Retriever or Generator not initialised.",
+        )
+
+    try:
+        notebook_service.get_notebook(notebook_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    try:
+        podcast = podcast_service.generate_podcast(
+            notebook_id, _state.retriever, _state.generator,
+        )
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(
+            _state.source_pool,
+            podcast_service.process_podcast,
+            podcast["id"],
+            _state.retriever,
+            _state.generator,
+        )
+        return podcast
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/notebooks/{notebook_id}/podcast", summary="Get podcast status")
+async def get_podcast(notebook_id: str):
+    """Return the latest podcast for this notebook with its current status."""
+    try:
+        notebook_service.get_notebook(notebook_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    podcast = podcast_service.get_podcast_for_notebook(notebook_id)
+    if not podcast:
+        raise HTTPException(status_code=404, detail="No podcast found for this notebook.")
+    return podcast
+
+
+@app.get("/notebooks/{notebook_id}/podcast/audio", summary="Stream podcast audio")
+async def get_podcast_audio(notebook_id: str):
+    """Serve the generated podcast MP3 audio file."""
+    podcast = podcast_service.get_podcast_for_notebook(notebook_id)
+    if not podcast:
+        raise HTTPException(status_code=404, detail="No podcast found.")
+    if podcast["status"] != "ready":
+        raise HTTPException(status_code=409, detail=f"Podcast is not ready (status: {podcast['status']}).")
+
+    audio_path = podcast.get("audio_path")
+    if not audio_path or not Path(audio_path).exists():
+        raise HTTPException(status_code=404, detail="Audio file not found on disk.")
+
+    return FileResponse(
+        audio_path,
+        media_type="audio/mpeg",
+        filename=f"podcast-{notebook_id[:8]}.mp3",
+    )
+
+
+@app.delete(
+    "/notebooks/{notebook_id}/podcast",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete podcast",
+)
+async def delete_podcast(notebook_id: str):
+    """Delete the podcast and its audio file for this notebook."""
+    podcast = podcast_service.get_podcast_for_notebook(notebook_id)
+    if not podcast:
+        raise HTTPException(status_code=404, detail="No podcast found.")
+    try:
+        podcast_service.delete_podcast(podcast["id"])
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
 
 
 # ═══════════════════════════════════════════════════════════════════════════

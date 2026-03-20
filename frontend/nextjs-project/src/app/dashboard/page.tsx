@@ -16,11 +16,16 @@ import {
   generateSummary,
   generateMindMap,
   generateQuiz,
+  generatePodcast,
+  getPodcast,
+  getPodcastAudioUrl,
+  deletePodcast,
   type SourceRecord,
   type Source as ChunkSource,
   type Flashcard,
   type MindMapData,
   type QuizQuestion,
+  type PodcastRecord,
 } from "@/lib/api";
 import { useToast } from "@/components/ui/toast";
 
@@ -73,7 +78,7 @@ const isTerminalStatus = (status: string) => status === "ready" || status === "e
 /* ─── types ─── */
 type SourceAttribution = { name: string; pages: number[] };
 type Message = { id: number; role: "user" | "ai"; text: string; sourceAttrs?: SourceAttribution[]; attachments?: string[] };
-type StudioView = "home" | "flashcards" | "mindmap" | "summary" | "quiz";
+type StudioView = "home" | "flashcards" | "mindmap" | "summary" | "quiz" | "podcast";
 
 /* ─── sample data ─── */
 const CARDS = [
@@ -1170,10 +1175,19 @@ function StudioSidebar({ isNew, view, onViewChange, fullscreen, onFullscreenChan
   const [realSummary, setRealSummary] = useState<string>("");
   const [realMindMap, setRealMindMap] = useState<MindMapData | null>(null);
   const [realQuiz, setRealQuiz] = useState<QuizQuestion[]>([]);
+  const [podcastData, setPodcastData] = useState<PodcastRecord | null>(null);
+  const podcastPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const setView = onViewChange;
   const setFullscreen = onFullscreenChange;
   const [fsClosing, setFsClosing] = useState(false);
+
+  // Cleanup podcast poll on unmount
+  useEffect(() => {
+    return () => {
+      if (podcastPollRef.current) clearInterval(podcastPollRef.current);
+    };
+  }, []);
 
   // Handle tool card click — call real API
   const handleToolSelect = async (v: StudioView) => {
@@ -1182,8 +1196,42 @@ function StudioSidebar({ isNew, view, onViewChange, fullscreen, onFullscreenChan
     setGenerateError(null);
 
     try {
-      // Fetch source text via the notebook query endpoint to get context
-      // We use a broad question to retrieve the most content
+      if (v === "podcast") {
+        if (!notebookId) throw new Error("No notebook selected.");
+        const podcast = await generatePodcast(notebookId);
+        setPodcastData(podcast);
+
+        if (podcast.status === "ready") {
+          setGeneratedResults(prev => new Set(prev).add(v));
+          setGenerating(null);
+          return;
+        }
+
+        const poll = setInterval(async () => {
+          try {
+            const updated = await getPodcast(notebookId);
+            if (!updated) return;
+            setPodcastData(updated);
+            if (updated.status === "ready" || updated.status === "error") {
+              clearInterval(poll);
+              podcastPollRef.current = null;
+              if (updated.status === "ready") {
+                setGeneratedResults(prev => new Set(prev).add(v));
+              } else {
+                setGenerateError(updated.error_message || "Podcast generation failed.");
+              }
+              setGenerating(null);
+            }
+          } catch {
+            clearInterval(poll);
+            podcastPollRef.current = null;
+            setGenerating(null);
+          }
+        }, 3000);
+        podcastPollRef.current = poll;
+        return;
+      }
+
       const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
       const queryRes = await fetch(
         notebookId ? `${API_BASE}/notebooks/${notebookId}/query` : `${API_BASE}/query`,
@@ -1197,9 +1245,7 @@ function StudioSidebar({ isNew, view, onViewChange, fullscreen, onFullscreenChan
       let sourceText = "";
       if (queryRes.ok) {
         const qData = await queryRes.json();
-        // Use the answer + question as context, or fall back to a placeholder
         sourceText = qData.answer || "";
-        // Also append source chunk info if available
         if (qData.sources && qData.sources.length > 0) {
           sourceText = qData.sources.map((s: { citation: string }) => s.citation).join("\n") + "\n\n" + sourceText;
         }
@@ -1228,7 +1274,7 @@ function StudioSidebar({ isNew, view, onViewChange, fullscreen, onFullscreenChan
       const msg = err instanceof Error ? err.message : String(err);
       setGenerateError(msg);
     } finally {
-      setGenerating(null);
+      if (v !== "podcast") setGenerating(null);
     }
   };
   const closeFullscreen = () => {
@@ -1284,6 +1330,7 @@ function StudioSidebar({ isNew, view, onViewChange, fullscreen, onFullscreenChan
     { id: "mindmap",    label: "Mind Map",   sub: "Visualise connections between concepts in your documents.",          icon: "M12 12m-2 0a2 2 0 104 0 2 2 0 10-4 0M5 6a1.5 1.5 0 103 0 1.5 1.5 0 10-3 0M16 6a1.5 1.5 0 103 0 1.5 1.5 0 10-3 0M5 18a1.5 1.5 0 103 0 1.5 1.5 0 10-3 0M16 18a1.5 1.5 0 103 0 1.5 1.5 0 10-3 0M6.5 6.5L10 10M17.5 6.5L14 10M6.5 17.5L10 14M17.5 17.5L14 14" },
     { id: "summary",    label: "Summary",    sub: "Get a concise summary of key concepts from your uploaded material.", icon: "M3 6h18M3 10h14M3 14h10M3 18h7" },
     { id: "quiz",       label: "Quiz",       sub: "Test your knowledge with AI-generated questions from your sources.", icon: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" },
+    { id: "podcast",    label: "Podcast",    sub: "Generate an AI podcast discussion covering your source material.",   icon: "M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3zM19 10v2a7 7 0 01-14 0v-2M12 19v4M8 23h8" },
   ];
 
   const sidebarContent = (
@@ -1311,7 +1358,7 @@ function StudioSidebar({ isNew, view, onViewChange, fullscreen, onFullscreenChan
       </div>
 
       {/* ── Body ── */}
-      <div style={{ flex: 1, overflowY: (fullscreen && view === "mindmap") || view === "quiz" ? (fullscreen ? "auto" : "hidden") : "auto", padding: 14, display: "flex", flexDirection: "column" }}>
+      <div style={{ flex: 1, overflowY: (fullscreen && view === "mindmap") || view === "quiz" ? (fullscreen ? "auto" : "hidden") : "auto", padding: 14, display: "flex", flexDirection: "column", scrollbarWidth: "thin", scrollbarColor: "rgba(255,255,255,0.08) transparent" }}>
         <div key={view} className="studio-view-enter" style={{ display: "flex", flexDirection: "column", flex: 1 }}>
 
         {/* ── Home grid ── */}
@@ -1396,7 +1443,7 @@ function StudioSidebar({ isNew, view, onViewChange, fullscreen, onFullscreenChan
 
                     {/* Label */}
                     <span style={{ fontSize: "0.82rem", fontWeight: 500, color: "rgba(255,255,255,0.35)", flex: 1, animation: "skeletonGlow 1.4s ease-in-out infinite" }}>
-                      {generating === "flashcards" ? "Flashcards" : generating === "mindmap" ? "Mind Map" : generating === "summary" ? "Summary" : "Quiz"}
+                      {generating === "flashcards" ? "Flashcards" : generating === "mindmap" ? "Mind Map" : generating === "summary" ? "Summary" : generating === "podcast" ? (podcastData?.status ? `Podcast (${podcastData.status})` : "Podcast") : "Quiz"}
                     </span>
 
                     {/* Animated dots */}
@@ -1409,7 +1456,7 @@ function StudioSidebar({ isNew, view, onViewChange, fullscreen, onFullscreenChan
                 )}
 
                 {/* Completed rows */}
-                {(["flashcards", "mindmap", "summary", "quiz"] as StudioView[])
+                {(["flashcards", "mindmap", "summary", "quiz", "podcast"] as StudioView[])
                   .filter(v => generatedResults.has(v))
                   .map(result => {
                     const meta: Record<StudioView, { label: string; icon: string }> = {
@@ -1418,6 +1465,7 @@ function StudioSidebar({ isNew, view, onViewChange, fullscreen, onFullscreenChan
                       mindmap:    { label: "Mind Map",   icon: "M12 12m-2 0a2 2 0 104 0 2 2 0 10-4 0M5 6a1.5 1.5 0 103 0 1.5 1.5 0 10-3 0M16 6a1.5 1.5 0 103 0 1.5 1.5 0 10-3 0M5 18a1.5 1.5 0 103 0 1.5 1.5 0 10-3 0M16 18a1.5 1.5 0 103 0 1.5 1.5 0 10-3 0M6.5 6.5L10 10M17.5 6.5L14 10M6.5 17.5L10 14M17.5 17.5L14 14" },
                       summary:    { label: "Summary",    icon: "M3 6h18M3 10h14M3 14h10M3 18h7" },
                       quiz:       { label: "Quiz",       icon: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" },
+                      podcast:    { label: "Podcast",    icon: "M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3zM19 10v2a7 7 0 01-14 0v-2M12 19v4M8 23h8" },
                     };
                     const { label, icon } = meta[result];
                     return (
@@ -1964,12 +2012,115 @@ function StudioSidebar({ isNew, view, onViewChange, fullscreen, onFullscreenChan
           </div>
         )}
 
+        {/* ── Podcast ── */}
+        {view === "podcast" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            {isNew ? (
+              <div style={{ textAlign: "center", padding: "40px 20px", color: "rgba(255,255,255,0.35)" }}>
+                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" style={{ margin: "0 auto 12px", opacity: 0.3 }}>
+                  <path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3zM19 10v2a7 7 0 01-14 0v-2M12 19v4M8 23h8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+                <p style={{ fontSize: "0.82rem", margin: 0 }}>Add sources first to generate a podcast.</p>
+              </div>
+            ) : !podcastData || podcastData.status === "error" ? (
+              <div style={{ textAlign: "center", padding: "30px 20px" }}>
+                {podcastData?.status === "error" && (
+                  <div style={{ padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(239,68,68,0.3)", background: "rgba(239,68,68,0.06)", fontSize: "0.75rem", color: "rgba(252,165,165,0.9)", marginBottom: 16, lineHeight: 1.5 }}>
+                    {podcastData.error_message || "Generation failed."}
+                  </div>
+                )}
+                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" style={{ margin: "0 auto 14px", opacity: 0.2 }}>
+                  <path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3zM19 10v2a7 7 0 01-14 0v-2M12 19v4M8 23h8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+                <p style={{ fontSize: "0.82rem", color: "rgba(255,255,255,0.4)", margin: "0 0 6px" }}>No podcast generated yet.</p>
+                <p style={{ fontSize: "0.72rem", color: "rgba(255,255,255,0.2)", margin: 0 }}>Click the Podcast card on the home screen to generate one.</p>
+              </div>
+            ) : podcastData.status === "ready" ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                {/* Audio player */}
+                <div style={{ borderRadius: 10, background: "#111", border: "1px solid #1f1f1f", padding: 16 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+                    <div style={{ width: 36, height: 36, borderRadius: 8, background: "linear-gradient(135deg, rgba(140,175,255,0.15), rgba(140,175,255,0.05))", border: "1px solid rgba(140,175,255,0.2)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                        <path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z" stroke="rgba(140,175,255,0.8)" strokeWidth="1.5" strokeLinecap="round" />
+                        <path d="M19 10v2a7 7 0 01-14 0v-2" stroke="rgba(140,175,255,0.5)" strokeWidth="1.5" strokeLinecap="round" />
+                      </svg>
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <p style={{ fontSize: "0.85rem", fontWeight: 600, color: "rgba(255,255,255,0.85)", margin: 0 }}>AI Podcast</p>
+                      <p style={{ fontSize: "0.7rem", color: "rgba(255,255,255,0.3)", margin: 0 }}>Generated from your sources</p>
+                    </div>
+                  </div>
+                  <audio
+                    controls
+                    src={notebookId ? getPodcastAudioUrl(notebookId) : undefined}
+                    style={{
+                      width: "100%",
+                      height: 36,
+                      borderRadius: 6,
+                      outline: "none",
+                      filter: "invert(1) hue-rotate(180deg) brightness(0.85) contrast(0.9)",
+                    }}
+                  />
+                </div>
+
+                {/* Transcript */}
+                {podcastData.transcript && (
+                  <div style={{ borderRadius: 10, background: "#0a0a0a", border: "1px solid #1a1a1a", padding: 16 }}>
+                    <p style={{ fontSize: "0.75rem", fontWeight: 600, color: "rgba(255,255,255,0.4)", letterSpacing: "0.06em", textTransform: "uppercase", margin: "0 0 12px" }}>Transcript</p>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 10, maxHeight: 400, overflowY: "auto" }}>
+                      {podcastData.transcript.split("\n").filter((l: string) => l.trim()).map((line: string, i: number) => {
+                        const colonIdx = line.indexOf(":");
+                        if (colonIdx === -1) return null;
+                        const speaker = line.substring(0, colonIdx).trim();
+                        const text = line.substring(colonIdx + 1).trim();
+                        const isHost1 = speaker === "Alex";
+                        return (
+                          <div key={i} style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                            <div style={{
+                              width: 28, height: 28, borderRadius: "50%", flexShrink: 0, marginTop: 2,
+                              background: isHost1 ? "linear-gradient(135deg, #3b82f6, #1d4ed8)" : "linear-gradient(135deg, #a855f7, #7c3aed)",
+                              display: "flex", alignItems: "center", justifyContent: "center",
+                              fontSize: "0.65rem", fontWeight: 700, color: "#fff",
+                            }}>
+                              {speaker.charAt(0)}
+                            </div>
+                            <div style={{ flex: 1 }}>
+                              <p style={{ fontSize: "0.7rem", fontWeight: 600, color: isHost1 ? "rgba(96,165,250,0.8)" : "rgba(168,85,247,0.8)", margin: "0 0 2px" }}>{speaker}</p>
+                              <p style={{ fontSize: "0.78rem", color: "rgba(255,255,255,0.65)", lineHeight: 1.55, margin: 0 }}>{text}</p>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div style={{ textAlign: "center", padding: "40px 20px" }}>
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" style={{ margin: "0 auto 12px", animation: "spin 1.2s linear infinite" }}>
+                  <circle cx="12" cy="12" r="9" stroke="rgba(255,255,255,0.08)" strokeWidth="2" />
+                  <path d="M12 3a9 9 0 019 9" stroke="rgba(140,175,255,0.6)" strokeWidth="2" strokeLinecap="round" />
+                </svg>
+                <p style={{ fontSize: "0.82rem", fontWeight: 500, color: "rgba(255,255,255,0.5)", margin: "0 0 4px" }}>
+                  {podcastData.status === "retrieving" ? "Retrieving source content..." :
+                   podcastData.status === "scripting" ? "Writing podcast script..." :
+                   podcastData.status.startsWith("synthesizing") ? `Synthesizing audio (${podcastData.status.replace("synthesizing ", "")})` :
+                   podcastData.status === "assembling" ? "Assembling final audio..." :
+                   "Generating podcast..."}
+                </p>
+                <p style={{ fontSize: "0.68rem", color: "rgba(255,255,255,0.2)", margin: 0 }}>This may take a minute</p>
+              </div>
+            )}
+          </div>
+        )}
+
       </div>  {/* end keyed animation wrapper */}
       </div>
     </>
   );
 
-  const sidebarWidth = (view === "flashcards" || view === "mindmap" || view === "summary" || view === "quiz") ? 560 : 280;
+  const sidebarWidth = (view === "flashcards" || view === "mindmap" || view === "summary" || view === "quiz" || view === "podcast") ? 560 : 280;
 
   return (
     <>
