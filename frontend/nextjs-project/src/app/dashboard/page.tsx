@@ -6,16 +6,64 @@ import { useSearchParams } from "next/navigation";
 import {
   askQuestion,
   listSources,
-  uploadSource,
+  uploadSourceWithProgress,
   addTextSource,
   deleteSource as deleteSourceApi,
   updateNotebookTitle,
   type SourceRecord,
+  type Source as ChunkSource,
 } from "@/lib/api";
 import { useToast } from "@/components/ui/toast";
 
+/* ─── Client-side extended source type ─── */
+interface ClientSource extends SourceRecord {
+  _uploadProgress?: number;
+  _isOptimistic?: boolean;
+}
+
+/**
+ * Map a source's pipeline status to an overall 0-100 percentage.
+ * Upload phase (0-15), pending (18), extracting (25), chunking (40),
+ * embedding (40-85 based on batch ratio), storing (90), ready (100).
+ */
+function getProgressPercent(source: ClientSource): number {
+  const { status, _uploadProgress } = source;
+  if (status === "uploading") return Math.round((_uploadProgress ?? 0) * 0.15);
+  if (status === "pending") return 18;
+  if (status === "extracting") return 25;
+  if (status === "chunking") return 40;
+  if (status.startsWith("embedding")) {
+    const match = status.match(/(\d+)\/(\d+)/);
+    if (match) {
+      const ratio = parseInt(match[1]) / parseInt(match[2]);
+      return Math.round(40 + ratio * 45);
+    }
+    return 50;
+  }
+  if (status === "storing") return 90;
+  if (status === "ready") return 100;
+  if (status === "error") return 100;
+  return 0;
+}
+
+/**
+ * Readable label for each pipeline status shown in the sidebar row.
+ */
+function getStatusLabel(status: string): string {
+  if (status === "uploading") return "uploading…";
+  if (status === "pending") return "queued";
+  if (status === "extracting") return "extracting…";
+  if (status === "chunking") return "chunking…";
+  if (status.startsWith("embedding")) return status;
+  if (status === "storing") return "saving…";
+  return status;
+}
+
+const isTerminalStatus = (status: string) => status === "ready" || status === "error";
+
 /* ─── types ─── */
-type Message = { id: number; role: "user" | "ai"; text: string };
+type SourceAttribution = { name: string; pages: number[] };
+type Message = { id: number; role: "user" | "ai"; text: string; sourceAttrs?: SourceAttribution[] };
 type StudioView = "home" | "flashcards" | "mindmap" | "summary" | "quiz";
 
 /* ─── sample data ─── */
@@ -111,90 +159,16 @@ function Icon({ d, size = 16 }: { d: string | string[]; size?: number }) {
   );
 }
 
-/* ─── Sidebar: Sources ─── */
-function SourcesSidebar({ notebookId, onAdd }: { notebookId: string | null; onAdd: () => void }) {
-  const [sources, setSources] = useState<SourceRecord[]>([]);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const prevStatusRef = useRef<Record<string, string>>({});
-  const { success: toastSuccess, error: toastError, info: toastInfo } = useToast();
-
-  const fetchSources = useCallback(async () => {
-    if (!notebookId) return;
-    try {
-      const list = await listSources(notebookId);
-      setSources(list);
-    } catch { /* ignore */ }
-  }, [notebookId]);
-
-  useEffect(() => { fetchSources(); }, [fetchSources]);
-
-  const isTerminal = (status: string) => status === "ready" || status === "error";
-
-  useEffect(() => {
-    const prev = prevStatusRef.current;
-    for (const s of sources) {
-      const oldStatus = prev[s.id];
-      if (oldStatus && oldStatus !== s.status) {
-        if (s.status === "ready") {
-          toastSuccess(`"${s.name}" processed successfully`);
-        } else if (s.status === "error") {
-          toastError(`"${s.name}" failed to process`);
-        }
-      }
-    }
-    const next: Record<string, string> = {};
-    for (const s of sources) next[s.id] = s.status;
-    prevStatusRef.current = next;
-  }, [sources, toastSuccess, toastError]);
-
-  useEffect(() => {
-    const hasActive = sources.some(s => !isTerminal(s.status));
-    if (!hasActive) return;
-    const interval = setInterval(fetchSources, 2000);
-    return () => clearInterval(interval);
-  }, [sources, fetchSources]);
-
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!e.target.files || e.target.files.length === 0 || !notebookId) return;
-    const files = Array.from(e.target.files);
-    for (const file of files) {
-      try {
-        await uploadSource(notebookId, file);
-        toastInfo(`"${file.name}" uploaded — processing`);
-      } catch {
-        toastError(`Failed to upload "${file.name}"`);
-      }
-    }
-    e.target.value = "";
-    fetchSources();
-  };
-
-  const handleDeleteSource = async (sourceId: string) => {
-    if (!notebookId) return;
-    const name = sources.find(s => s.id === sourceId)?.name ?? "Source";
-    try {
-      await deleteSourceApi(notebookId, sourceId);
-      setSources(prev => prev.filter(s => s.id !== sourceId));
-      toastSuccess(`"${name}" removed`);
-    } catch {
-      toastError(`Failed to delete "${name}"`);
-    }
-  };
-
-  const statusIndicator = (s: SourceRecord) => {
-    if (s.status === "error") {
-      return <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#ef4444", flexShrink: 0 }} title={s.error_message || "Error"} />;
-    }
-    if (isTerminal(s.status)) return null;
-    const label = s.status === "pending" ? "queued" : s.status;
-    return (
-      <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
-        <div style={{ width: 8, height: 8, borderRadius: "50%", border: "1.5px solid rgba(255,255,255,0.3)", borderTopColor: "rgba(140,175,255,0.8)", animation: "spin 0.8s linear infinite" }} />
-        <span style={{ fontSize: "0.6rem", color: "rgba(140,175,255,0.7)", whiteSpace: "nowrap" }}>{label}</span>
-      </div>
-    );
-  };
-
+/* ─── Sidebar: Sources (presentational — state lifted to DashboardInner) ─── */
+function SourcesSidebar({
+  sources,
+  onAdd,
+  onDelete,
+}: {
+  sources: ClientSource[];
+  onAdd: () => void;
+  onDelete: (id: string) => void;
+}) {
   return (
     <aside style={{
       width: 240,
@@ -204,21 +178,19 @@ function SourcesSidebar({ notebookId, onAdd }: { notebookId: string | null; onAd
       flexShrink: 0,
       overflow: "hidden",
     }}>
-      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      <style>{`
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes progressPulse {
+          0%,100% { opacity: 1; }
+          50% { opacity: 0.6; }
+        }
+      `}</style>
       <div style={{ padding: "14px 12px 10px", borderBottom: "1px solid #1a1a1a" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
           <span style={{ fontSize: "0.72rem", fontWeight: 600, color: "rgba(255,255,255,0.35)", letterSpacing: "0.08em", textTransform: "uppercase" }}>Sources</span>
           <span style={{ fontSize: "0.65rem", padding: "2px 7px", borderRadius: 4, background: "#1a1a1a", color: "rgba(255,255,255,0.4)", border: "1px solid #2a2a2a" }}>{sources.length}</span>
         </div>
-        <input
-          type="file"
-          ref={fileInputRef}
-          style={{ display: "none" }}
-          multiple
-          accept=".pdf,.doc,.docx,.txt"
-          onChange={handleFileChange}
-        />
-        <button onClick={() => fileInputRef.current?.click()} className="action-btn" style={{
+        <button onClick={onAdd} className="action-btn" style={{
           width: "100%",
           padding: "8px",
           borderRadius: 6,
@@ -241,20 +213,24 @@ function SourcesSidebar({ notebookId, onAdd }: { notebookId: string | null; onAd
 
       <div style={{ flex: 1, overflowY: "auto", padding: "8px" }}>
         {sources.map(s => (
-          <SourceRow key={s.id} source={s} statusIndicator={statusIndicator} onDelete={handleDeleteSource} />
+          <SourceRow key={s.id} source={s} onDelete={onDelete} />
         ))}
       </div>
     </aside>
   );
 }
 
-/* ─── Source row with hover delete ─── */
-function SourceRow({ source: s, statusIndicator, onDelete }: {
-  source: SourceRecord;
-  statusIndicator: (s: SourceRecord) => React.ReactNode;
+/* ─── Source row with progress bar and hover delete ─── */
+function SourceRow({ source: s, onDelete }: {
+  source: ClientSource;
   onDelete: (id: string) => void;
 }) {
   const [hovered, setHovered] = useState(false);
+  const terminal = isTerminalStatus(s.status);
+  const percent = getProgressPercent(s);
+  const label = s.status === "uploading" && s._uploadProgress != null
+    ? `uploading ${s._uploadProgress}%`
+    : getStatusLabel(s.status);
 
   return (
     <div
@@ -262,45 +238,87 @@ function SourceRow({ source: s, statusIndicator, onDelete }: {
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 8,
         padding: "7px 8px",
         borderRadius: 6,
-        cursor: "pointer",
+        cursor: "default",
         transition: "background 0.1s",
         marginBottom: 2,
         background: hovered ? "rgba(255,255,255,0.03)" : "transparent",
       }}
     >
-      <div style={{ flexShrink: 0, width: 24, height: 24, borderRadius: 5, background: "#111", border: "1px solid #222", display: "flex", alignItems: "center", justifyContent: "center" }}>
-        <Icon d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8zM14 2v6h6" size={11} />
-      </div>
-      <span style={{ fontSize: "0.75rem", color: "rgba(255,255,255,0.45)", overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis", flex: 1 }}>{s.name}</span>
-      {statusIndicator(s)}
-      {hovered && (
-        <button
-          onClick={e => { e.stopPropagation(); onDelete(s.id); }}
-          title="Remove source"
-          style={{
-            background: "none", border: "none", cursor: "pointer",
-            padding: 2, display: "flex", alignItems: "center", justifyContent: "center",
-            color: "rgba(255,255,255,0.25)", transition: "color 0.15s", flexShrink: 0,
-          }}
-          onMouseEnter={e => (e.currentTarget.style.color = "#ef4444")}
-          onMouseLeave={e => (e.currentTarget.style.color = "rgba(255,255,255,0.25)")}
-        >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
-            <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      {/* Top row: icon + name + status / delete */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ flexShrink: 0, width: 24, height: 24, borderRadius: 5, background: "#111", border: "1px solid #222", display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <Icon d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8zM14 2v6h6" size={11} />
+        </div>
+        <span style={{ fontSize: "0.75rem", color: "rgba(255,255,255,0.45)", overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis", flex: 1 }}>{s.name}</span>
+
+        {/* Status indicator for non-terminal states */}
+        {!terminal && (
+          <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
+            <div style={{ width: 8, height: 8, borderRadius: "50%", border: "1.5px solid rgba(255,255,255,0.3)", borderTopColor: "rgba(140,175,255,0.8)", animation: "spin 0.8s linear infinite" }} />
+            <span style={{ fontSize: "0.58rem", color: "rgba(140,175,255,0.7)", whiteSpace: "nowrap", maxWidth: 72, overflow: "hidden", textOverflow: "ellipsis" }}>{label}</span>
+          </div>
+        )}
+
+        {/* Error dot */}
+        {s.status === "error" && (
+          <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#ef4444", flexShrink: 0 }} title={s.error_message || "Error"} />
+        )}
+
+        {/* Ready checkmark */}
+        {s.status === "ready" && (
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" style={{ flexShrink: 0 }}>
+            <path d="M20 6L9 17l-5-5" stroke="rgba(74,222,128,0.7)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
-        </button>
+        )}
+
+        {/* Delete button on hover (only when terminal) */}
+        {hovered && terminal && (
+          <button
+            onClick={e => { e.stopPropagation(); onDelete(s.id); }}
+            title="Remove source"
+            style={{
+              background: "none", border: "none", cursor: "pointer",
+              padding: 2, display: "flex", alignItems: "center", justifyContent: "center",
+              color: "rgba(255,255,255,0.25)", transition: "color 0.15s", flexShrink: 0,
+            }}
+            onMouseEnter={e => (e.currentTarget.style.color = "#ef4444")}
+            onMouseLeave={e => (e.currentTarget.style.color = "rgba(255,255,255,0.25)")}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
+              <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            </svg>
+          </button>
+        )}
+      </div>
+
+      {/* Progress bar underneath — visible only during processing */}
+      {!terminal && (
+        <div style={{
+          width: "100%",
+          height: 3,
+          borderRadius: 2,
+          background: "rgba(255,255,255,0.06)",
+          overflow: "hidden",
+          marginTop: 5,
+        }}>
+          <div style={{
+            height: "100%",
+            borderRadius: 2,
+            background: "linear-gradient(90deg, #3b82f6, #8b5cf6)",
+            width: `${percent}%`,
+            transition: "width 0.4s ease",
+            animation: percent < 18 ? "progressPulse 1.4s ease-in-out infinite" : "none",
+          }} />
+        </div>
       )}
     </div>
   );
 }
 
 /* ─── Chat area ─── */
-function ChatArea({ isNew, notebookId }: { isNew: boolean; notebookId: string | null }) {
+function ChatArea({ isNew, notebookId, onUploadFiles }: { isNew: boolean; notebookId: string | null; onUploadFiles?: (files: File[]) => void }) {
   const [messages, setMessages] = useState<Message[]>(EMPTY_MESSAGES);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -309,9 +327,25 @@ function ChatArea({ isNew, notebookId }: { isNew: boolean; notebookId: string | 
   const chatFileRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const dragCounter = useRef(0);
-  const { info: toastInfo, error: toastError } = useToast();
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+
+  /**
+   * Build de-duplicated source attribution list from chunk results.
+   * Groups pages by source_name for a compact display.
+   */
+  const buildAttrs = (chunks: ChunkSource[]): SourceAttribution[] => {
+    const map = new Map<string, Set<number>>();
+    for (const c of chunks) {
+      const name = c.source_name || "Unknown source";
+      if (!map.has(name)) map.set(name, new Set());
+      if (c.page) map.get(name)!.add(c.page);
+    }
+    return Array.from(map.entries()).map(([name, pages]) => ({
+      name,
+      pages: Array.from(pages).sort((a, b) => a - b),
+    }));
+  };
 
   const send = async () => {
     if (!input.trim() || loading) return;
@@ -320,8 +354,9 @@ function ChatArea({ isNew, notebookId }: { isNew: boolean; notebookId: string | 
     setInput("");
     setLoading(true);
     try {
-      const result = await askQuestion(input, 5, notebookId ?? undefined);
-      const aiMsg: Message = { id: Date.now() + 1, role: "ai", text: result.answer };
+      const result = await askQuestion(input, 10, notebookId ?? undefined);
+      const attrs = buildAttrs(result.sources);
+      const aiMsg: Message = { id: Date.now() + 1, role: "ai", text: result.answer, sourceAttrs: attrs };
       setMessages(p => [...p, aiMsg]);
     } catch (err: unknown) {
       const detail = err instanceof Error ? err.message : String(err);
@@ -347,35 +382,21 @@ function ChatArea({ isNew, notebookId }: { isNew: boolean; notebookId: string | 
     if (dragCounter.current === 0) setDraggingOver(false);
   };
   const handleDragOver = (e: React.DragEvent) => { e.preventDefault(); };
-  const handleDrop = async (e: React.DragEvent) => {
+  const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     dragCounter.current = 0;
     setDraggingOver(false);
-    if (e.dataTransfer.files && e.dataTransfer.files.length > 0 && notebookId) {
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
       const files = Array.from(e.dataTransfer.files);
       setDroppedFiles(files.map(f => f.name));
-      for (const file of files) {
-        try {
-          await uploadSource(notebookId, file);
-          toastInfo(`"${file.name}" uploaded — processing`);
-        } catch {
-          toastError(`Failed to upload "${file.name}"`);
-        }
-      }
+      onUploadFiles?.(files);
     }
   };
-  const handleChatFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files.length > 0 && notebookId) {
+  const handleChatFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
       const files = Array.from(e.target.files);
       setDroppedFiles(files.map(f => f.name));
-      for (const file of files) {
-        try {
-          await uploadSource(notebookId, file);
-          toastInfo(`"${file.name}" uploaded — processing`);
-        } catch {
-          toastError(`Failed to upload "${file.name}"`);
-        }
-      }
+      onUploadFiles?.(files);
     }
     e.target.value = "";
   };
@@ -501,6 +522,36 @@ function ChatArea({ isNew, notebookId }: { isNew: boolean; notebookId: string | 
               }}>
                 {m.text}
               </div>
+              {/* Source attribution badges */}
+              {m.role === "ai" && m.sourceAttrs && m.sourceAttrs.length > 0 && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8, maxWidth: "78%" }}>
+                  {m.sourceAttrs.map((sa, i) => (
+                    <div key={i} style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 5,
+                      padding: "4px 10px",
+                      borderRadius: 6,
+                      background: "rgba(91,138,240,0.08)",
+                      border: "1px solid rgba(91,138,240,0.18)",
+                      fontSize: "0.68rem",
+                      color: "rgba(140,175,255,0.85)",
+                      lineHeight: 1.3,
+                    }}>
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" style={{ flexShrink: 0 }}>
+                        <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                        <path d="M14 2v6h6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                      <span style={{ maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sa.name}</span>
+                      {sa.pages.length > 0 && (
+                        <span style={{ color: "rgba(140,175,255,0.5)", fontSize: "0.62rem" }}>
+                          p.{sa.pages.length <= 3 ? sa.pages.join(", ") : `${sa.pages[0]}–${sa.pages[sa.pages.length - 1]}`}
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           ))}
           {loading && (
@@ -1659,24 +1710,23 @@ function StudioSidebar({ isNew, view, onViewChange, fullscreen, onFullscreenChan
 }
 
 /* ─── Source Upload Modal ─── */
-function SourceUploadModal({ onClose, notebookId, onSourceAdded }: { onClose: () => void; notebookId: string; onSourceAdded: () => void }) {
+function SourceUploadModal({
+  onClose,
+  onUploadFiles,
+  onPasteText,
+}: {
+  onClose: () => void;
+  onUploadFiles: (files: File[]) => void;
+  onPasteText: (text: string) => void;
+}) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
   const [pasteMode, setPasteMode] = useState(false);
   const [pasteText, setPasteText] = useState("");
-  const { success: toastSuccess, error: toastError, info: toastInfo } = useToast();
 
-  const handleFiles = async (files: FileList | null) => {
+  const handleFiles = (files: FileList | null) => {
     if (!files || files.length === 0) return;
-    for (const file of Array.from(files)) {
-      try {
-        await uploadSource(notebookId, file);
-        toastInfo(`"${file.name}" uploaded — processing`);
-      } catch {
-        toastError(`Failed to upload "${file.name}"`);
-      }
-    }
-    onSourceAdded();
+    onUploadFiles(Array.from(files));
     onClose();
   };
 
@@ -1686,15 +1736,9 @@ function SourceUploadModal({ onClose, notebookId, onSourceAdded }: { onClose: ()
     handleFiles(e.dataTransfer.files);
   };
 
-  const handlePasteSubmit = async () => {
+  const handlePasteSubmit = () => {
     if (!pasteText.trim()) return;
-    try {
-      await addTextSource(notebookId, "Pasted text", pasteText);
-      toastSuccess("Text source added — processing");
-    } catch {
-      toastError("Failed to add text source");
-    }
-    onSourceAdded();
+    onPasteText(pasteText.trim());
     onClose();
   };
 
@@ -1867,9 +1911,138 @@ function DashboardInner() {
   const [shareText, setShareText] = useState("Share");
   const [showExport, setShowExport] = useState(false);
   const [showUploadModal, setShowUploadModal] = useState(false);
-  const [sourcesKey, setSourcesKey] = useState(0);
   const [studioView, setStudioView] = useState<StudioView>("home");
   const [studioFullscreen, setStudioFullscreen] = useState(false);
+  const { success: toastSuccess, error: toastError } = useToast();
+
+  /* ─── Lifted sources state ─── */
+  const [sources, setSources] = useState<ClientSource[]>([]);
+  const prevStatusRef = useRef<Record<string, string>>({});
+
+  const fetchSources = useCallback(async () => {
+    if (!notebookId) return;
+    try {
+      const list = await listSources(notebookId);
+      setSources(prev => {
+        const optimistic = prev.filter(s => s._isOptimistic);
+        const serverIds = new Set(list.map(s => s.id));
+        const keep = optimistic.filter(o => !serverIds.has(o.id));
+        return [...list, ...keep];
+      });
+    } catch { /* ignore */ }
+  }, [notebookId]);
+
+  useEffect(() => { fetchSources(); }, [fetchSources]);
+
+  useEffect(() => {
+    const hasActive = sources.some(s => !isTerminalStatus(s.status) && !s._isOptimistic);
+    if (!hasActive) return;
+    const interval = setInterval(fetchSources, 2000);
+    return () => clearInterval(interval);
+  }, [sources, fetchSources]);
+
+  useEffect(() => {
+    const prev = prevStatusRef.current;
+    for (const s of sources) {
+      const oldStatus = prev[s.id];
+      if (oldStatus && oldStatus !== s.status) {
+        if (s.status === "ready") toastSuccess(`"${s.name}" processed successfully`);
+        else if (s.status === "error") toastError(`"${s.name}" failed to process`);
+      }
+    }
+    const next: Record<string, string> = {};
+    for (const s of sources) next[s.id] = s.status;
+    prevStatusRef.current = next;
+  }, [sources, toastSuccess, toastError]);
+
+  /**
+   * Upload files with optimistic UI + real progress.
+   * Files appear in sidebar immediately and progress bar tracks each stage.
+   */
+  const handleUploadFiles = useCallback((files: File[]) => {
+    if (!notebookId) return;
+
+    const optimistics: ClientSource[] = files.map((file, i) => ({
+      id: `temp-${Date.now()}-${i}-${file.name}`,
+      notebook_id: notebookId,
+      name: file.name,
+      source_type: "file",
+      status: "uploading",
+      error_message: null,
+      chunk_count: 0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      _uploadProgress: 0,
+      _isOptimistic: true,
+    }));
+
+    setSources(prev => [...prev, ...optimistics]);
+
+    Promise.allSettled(
+      files.map(async (file, i) => {
+        const tempId = optimistics[i].id;
+        try {
+          const real = await uploadSourceWithProgress(
+            notebookId,
+            file,
+            (percent) => {
+              setSources(prev =>
+                prev.map(s => s.id === tempId ? { ...s, _uploadProgress: percent } : s)
+              );
+            },
+          );
+          setSources(prev =>
+            prev.map(s => s.id === tempId ? { ...real, _isOptimistic: false } : s)
+          );
+        } catch {
+          setSources(prev => prev.filter(s => s.id !== tempId));
+          toastError(`Failed to upload "${file.name}"`);
+        }
+      })
+    );
+  }, [notebookId, toastError]);
+
+  /**
+   * Handle pasted text source — add optimistic entry, submit, then swap.
+   */
+  const handlePasteText = useCallback(async (text: string) => {
+    if (!notebookId) return;
+    const tempId = `temp-paste-${Date.now()}`;
+    const optimistic: ClientSource = {
+      id: tempId,
+      notebook_id: notebookId,
+      name: "Pasted text",
+      source_type: "text",
+      status: "uploading",
+      error_message: null,
+      chunk_count: 0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      _uploadProgress: 50,
+      _isOptimistic: true,
+    };
+    setSources(prev => [...prev, optimistic]);
+    try {
+      const real = await addTextSource(notebookId, "Pasted text", text);
+      setSources(prev => prev.map(s => s.id === tempId ? { ...real, _isOptimistic: false } : s));
+      toastSuccess("Text source added — processing");
+    } catch {
+      setSources(prev => prev.filter(s => s.id !== tempId));
+      toastError("Failed to add text source");
+    }
+  }, [notebookId, toastSuccess, toastError]);
+
+  const handleDeleteSource = useCallback(async (sourceId: string) => {
+    if (!notebookId) return;
+    const name = sources.find(s => s.id === sourceId)?.name ?? "Source";
+    try {
+      await deleteSourceApi(notebookId, sourceId);
+      setSources(prev => prev.filter(s => s.id !== sourceId));
+      toastSuccess(`"${name}" removed`);
+    } catch {
+      toastError(`Failed to delete "${name}"`);
+    }
+  }, [notebookId, sources, toastSuccess, toastError]);
 
   useEffect(() => {
     if (!notebookId) return;
@@ -1877,8 +2050,6 @@ function DashboardInner() {
       getNotebook(notebookId).then(nb => setTitle(nb.title)).catch(() => {})
     );
   }, [notebookId]);
-
-  const { success: toastSuccess, error: toastError } = useToast();
 
   const handleTitleBlur = () => {
     if (notebookId && title.trim()) {
@@ -2100,11 +2271,11 @@ function DashboardInner() {
       <div style={{ flex: 1, display: "flex", overflow: "hidden", gap: 8, padding: "8px", background: "#000" }}>
         {/* Sources box */}
         <div style={{ display: "flex", flexDirection: "column", flexShrink: 0, border: "1px solid #1f1f1f", borderRadius: 10, overflow: "hidden", background: "#0a0a0a" }}>
-          <SourcesSidebar notebookId={notebookId} onAdd={() => setShowUploadModal(true)} key={sourcesKey} />
+          <SourcesSidebar sources={sources} onAdd={() => setShowUploadModal(true)} onDelete={handleDeleteSource} />
         </div>
         {/* Chat box */}
         <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0, border: "1px solid #1f1f1f", borderRadius: 10, background: "#0a0a0a" }}>
-          <ChatArea isNew={isNew} notebookId={notebookId} />
+          <ChatArea isNew={isNew} notebookId={notebookId} onUploadFiles={handleUploadFiles} />
         </div>
         {/* Studio box */}
         <div style={{ display: "contents" }}>
@@ -2114,9 +2285,9 @@ function DashboardInner() {
 
       {showUploadModal && notebookId && (
         <SourceUploadModal
-          notebookId={notebookId}
           onClose={() => setShowUploadModal(false)}
-          onSourceAdded={() => setSourcesKey(k => k + 1)}
+          onUploadFiles={handleUploadFiles}
+          onPasteText={handlePasteText}
         />
       )}
     </div>
