@@ -80,20 +80,26 @@ class Retriever:
         self.top_k = top_k
         self.score_threshold = score_threshold
 
-    def retrieve(self, query: str, top_k: Optional[int] = None) -> List[RetrievedChunk]:
+    def retrieve(
+        self,
+        query: str,
+        top_k: Optional[int] = None,
+        notebook_id: Optional[str] = None,
+    ) -> List[RetrievedChunk]:
         """
         Embed query and return the top-k most similar chunks.
 
         Args:
-            query: Natural-language question.
-            top_k: Override instance top_k for this call.
+            query:       Natural-language question.
+            top_k:       Override instance top_k for this call.
+            notebook_id: If provided, restrict search to this notebook's chunks.
 
         Returns:
             List of RetrievedChunk ordered by descending similarity score.
         """
         k = top_k if top_k is not None else self.top_k
         query_vec = self.embedder.embed(query)
-        raw = self.vector_store.search(query_vec, top_k=k)
+        raw = self.vector_store.search(query_vec, top_k=k, notebook_id=notebook_id)
 
         chunks = [self._to_chunk(row) for row in raw]
 
