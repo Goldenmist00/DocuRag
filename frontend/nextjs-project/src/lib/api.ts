@@ -230,3 +230,98 @@ export async function getStats() {
   if (!res.ok) throw new Error("Stats fetch failed");
   return res.json();
 }
+
+// ─── Studio: Flashcards ───
+
+export interface Flashcard {
+  term: string;
+  definition: string;
+  question: string;
+  answer: string;
+}
+
+export async function generateFlashcards(
+  text: string,
+  count = 10
+): Promise<Flashcard[]> {
+  const res = await fetch(`${API_BASE}/flashcards`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, count }),
+  });
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(`Flashcard generation failed: ${detail}`);
+  }
+  const data = await res.json();
+  return data.flashcards;
+}
+
+// ─── Studio: Summary ───
+
+export async function generateSummary(
+  text: string,
+  level: "short" | "medium" | "detailed" = "medium"
+): Promise<{ summary: string; level: string }> {
+  const res = await fetch(`${API_BASE}/summary`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, level }),
+  });
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(`Summary generation failed: ${detail}`);
+  }
+  return res.json();
+}
+
+// ─── Studio: Mind Map ───
+
+export interface MindMapBranch {
+  label: string;
+  children: string[];
+}
+
+export interface MindMapData {
+  root: string;
+  branches: MindMapBranch[];
+}
+
+export async function generateMindMap(text: string): Promise<MindMapData> {
+  const res = await fetch(`${API_BASE}/mindmap`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(`Mind map generation failed: ${detail}`);
+  }
+  return res.json();
+}
+
+// ─── Studio: Quiz ───
+
+export interface QuizQuestion {
+  q: string;
+  options: string[];
+  answer: number;
+}
+
+export async function generateQuiz(
+  text: string,
+  count = 10,
+  difficulty: "easy" | "medium" | "hard" | "mixed" = "mixed"
+): Promise<QuizQuestion[]> {
+  const res = await fetch(`${API_BASE}/quiz`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, count, difficulty }),
+  });
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(`Quiz generation failed: ${detail}`);
+  }
+  const data = await res.json();
+  return data.questions;
+}
