@@ -11,6 +11,7 @@ import {
   deleteSource as deleteSourceApi,
   updateNotebookTitle,
   type SourceRecord,
+  type Source as ChunkSource,
 } from "@/lib/api";
 import { useToast } from "@/components/ui/toast";
 
@@ -61,7 +62,8 @@ function getStatusLabel(status: string): string {
 const isTerminalStatus = (status: string) => status === "ready" || status === "error";
 
 /* ─── types ─── */
-type Message = { id: number; role: "user" | "ai"; text: string };
+type SourceAttribution = { name: string; pages: number[] };
+type Message = { id: number; role: "user" | "ai"; text: string; sourceAttrs?: SourceAttribution[] };
 type StudioView = "home" | "flashcards" | "mindmap" | "summary" | "quiz";
 
 /* ─── sample data ─── */
@@ -328,6 +330,23 @@ function ChatArea({ isNew, notebookId, onUploadFiles }: { isNew: boolean; notebo
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
 
+  /**
+   * Build de-duplicated source attribution list from chunk results.
+   * Groups pages by source_name for a compact display.
+   */
+  const buildAttrs = (chunks: ChunkSource[]): SourceAttribution[] => {
+    const map = new Map<string, Set<number>>();
+    for (const c of chunks) {
+      const name = c.source_name || "Unknown source";
+      if (!map.has(name)) map.set(name, new Set());
+      if (c.page) map.get(name)!.add(c.page);
+    }
+    return Array.from(map.entries()).map(([name, pages]) => ({
+      name,
+      pages: Array.from(pages).sort((a, b) => a - b),
+    }));
+  };
+
   const send = async () => {
     if (!input.trim() || loading) return;
     const userMsg: Message = { id: Date.now(), role: "user", text: input };
@@ -335,8 +354,9 @@ function ChatArea({ isNew, notebookId, onUploadFiles }: { isNew: boolean; notebo
     setInput("");
     setLoading(true);
     try {
-      const result = await askQuestion(input, 5, notebookId ?? undefined);
-      const aiMsg: Message = { id: Date.now() + 1, role: "ai", text: result.answer };
+      const result = await askQuestion(input, 10, notebookId ?? undefined);
+      const attrs = buildAttrs(result.sources);
+      const aiMsg: Message = { id: Date.now() + 1, role: "ai", text: result.answer, sourceAttrs: attrs };
       setMessages(p => [...p, aiMsg]);
     } catch (err: unknown) {
       const detail = err instanceof Error ? err.message : String(err);
@@ -502,6 +522,36 @@ function ChatArea({ isNew, notebookId, onUploadFiles }: { isNew: boolean; notebo
               }}>
                 {m.text}
               </div>
+              {/* Source attribution badges */}
+              {m.role === "ai" && m.sourceAttrs && m.sourceAttrs.length > 0 && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8, maxWidth: "78%" }}>
+                  {m.sourceAttrs.map((sa, i) => (
+                    <div key={i} style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 5,
+                      padding: "4px 10px",
+                      borderRadius: 6,
+                      background: "rgba(91,138,240,0.08)",
+                      border: "1px solid rgba(91,138,240,0.18)",
+                      fontSize: "0.68rem",
+                      color: "rgba(140,175,255,0.85)",
+                      lineHeight: 1.3,
+                    }}>
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" style={{ flexShrink: 0 }}>
+                        <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                        <path d="M14 2v6h6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                      <span style={{ maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sa.name}</span>
+                      {sa.pages.length > 0 && (
+                        <span style={{ color: "rgba(140,175,255,0.5)", fontSize: "0.62rem" }}>
+                          p.{sa.pages.length <= 3 ? sa.pages.join(", ") : `${sa.pages[0]}–${sa.pages[sa.pages.length - 1]}`}
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           ))}
           {loading && (

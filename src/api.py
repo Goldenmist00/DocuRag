@@ -96,6 +96,7 @@ class ChunkResult(BaseModel):
     section_title: str
     page: int
     score: float
+    source_name: str = ""
 
 
 class QueryResponse(BaseModel):
@@ -281,6 +282,7 @@ def _run_query(request: QueryRequest, notebook_id: Optional[str] = None) -> Quer
             section_title=c.section_title,
             page=c.page_start,
             score=round(c.score, 4),
+            source_name=c.source_name,
         )
         for c in chunks
     ]
