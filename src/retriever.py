@@ -22,6 +22,7 @@ from src.db import source_db
 logger = logging.getLogger(__name__)
 
 MIN_PER_SOURCE_K = 3
+MIN_GUARANTEED_PER_SOURCE = 2
 
 
 # ---------------------------------------------------------------------------
@@ -144,10 +145,15 @@ class Retriever:
         notebook_id: str,
     ) -> List[RetrievedChunk]:
         """
-        Retrieve from each ready source independently and merge results.
+        Retrieve from each ready source independently and merge with a
+        minimum-per-source guarantee so no source is starved.
 
-        Over-fetches per source (``max(MIN_PER_SOURCE_K, top_k)``), then
-        de-duplicates, sorts globally by score, and trims to ``top_k``.
+        Strategy:
+          1. Over-fetch ``max(MIN_PER_SOURCE_K, top_k)`` chunks per source.
+          2. De-duplicate by chunk_id.
+          3. Guarantee at least ``MIN_GUARANTEED_PER_SOURCE`` chunks per source
+             (round-robin pick of each source's best chunks).
+          4. Fill remaining slots with globally highest-scoring chunks.
 
         Args:
             query_vec:   Pre-computed embedding of the user query.
@@ -192,8 +198,26 @@ class Retriever:
                 seen.add(c.chunk_id)
                 unique.append(c)
 
-        unique.sort(key=lambda c: c.score, reverse=True)
-        return unique[:top_k]
+        by_source: Dict[str, List[RetrievedChunk]] = {}
+        for c in unique:
+            by_source.setdefault(c.source_id or c.source_name, []).append(c)
+
+        for chunks in by_source.values():
+            chunks.sort(key=lambda c: c.score, reverse=True)
+
+        result: List[RetrievedChunk] = []
+        used_ids: set = set()
+        for source_chunks in by_source.values():
+            for c in source_chunks[:MIN_GUARANTEED_PER_SOURCE]:
+                result.append(c)
+                used_ids.add(c.chunk_id)
+
+        remaining = [c for c in unique if c.chunk_id not in used_ids]
+        remaining.sort(key=lambda c: c.score, reverse=True)
+        result.extend(remaining[: max(0, top_k - len(result))])
+
+        result.sort(key=lambda c: c.score, reverse=True)
+        return result[:top_k]
 
     # ------------------------------------------------------------------
 
