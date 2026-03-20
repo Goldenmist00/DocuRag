@@ -1,19 +1,20 @@
-﻿@import 'tailwindcss';
+@import 'tailwindcss';
 
 @theme inline {
-  --color-background: #0a0a10;
+  --color-background: #060609;
   --color-foreground: rgba(255, 255, 255, 0.95);
-  --color-primary: #7352DD;
-  --color-accent: #A78BFA;
+  --color-primary: rgba(255, 255, 255, 0.9);
+  --color-accent: rgba(255, 255, 255, 0.5);
   --color-border: rgba(255, 255, 255, 0.08);
   --font-sans: var(--font-inria), 'Inria Sans', sans-serif;
+  --font-hero-body: var(--font-hero-display), var(--font-inria), sans-serif;
 }
 
 :root {
   --background: #0a0a10;
   --foreground: rgba(255, 255, 255, 0.95);
-  --primary: #7352DD;
-  --accent: #A78BFA;
+  --primary: rgba(255, 255, 255, 0.9);
+  --accent: rgba(255, 255, 255, 0.5);
   --border: rgba(255, 255, 255, 0.08);
 }
 
@@ -362,7 +363,7 @@ input:-webkit-autofill:focus {
 
 /* ── Gradient text utility ── */
 .gradient-text-purple {
-  background: linear-gradient(135deg, #C084FC 0%, #A78BFA 35%, #7352DD 65%, #818CF8 100%);
+  background: linear-gradient(135deg, rgba(255,255,255,0.9) 0%, rgba(255,255,255,0.6) 50%, rgba(255,255,255,0.4) 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -392,5 +393,14 @@ input:-webkit-autofill:focus {
 @keyframes scrollHintPulse {
   0%, 100% { opacity: 0.3; transform: scaleY(0.8); }
   50%       { opacity: 1;   transform: scaleY(1); }
+}
+
+/* ── Orbital timeline custom utilities ── */
+.bg-gradient-orbital {
+  background: linear-gradient(to bottom right, #6366f1, #3b82f6, #14b8a6);
+}
+
+.shadow-orbital {
+  box-shadow: 0 0 15px rgba(255, 255, 255, 0.1);
 }
 
