@@ -1019,7 +1019,7 @@ function StudioSidebar({ isNew, view, onViewChange, fullscreen, onFullscreenChan
   const [quizCountPreset, setQuizCountPreset] = useState<10 | 20 | 30 | "custom">(10);
   const [quizCustomInput, setQuizCustomInput] = useState("10");
 
-  const card = realFlashcards.length > 0 ? realFlashcards[cardIdx] : CARDS[cardIdx];
+  const card = realFlashcards.length > 0 ? realFlashcards[cardIdx] : { question: CARDS[cardIdx].q, answer: CARDS[cardIdx].a, term: CARDS[cardIdx].term, definition: CARDS[cardIdx].def };
   const front = card.question;
   const back  = card.answer;
 
