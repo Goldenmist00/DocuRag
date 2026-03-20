@@ -16,6 +16,8 @@ import re
 import json
 import hashlib
 import logging
+import unicodedata
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict
@@ -93,6 +95,15 @@ _ARTIFACTS_RE = [
     re.compile(r"Access for free at openstax.org", re.IGNORECASE),
 ]
 
+_DEHYPHEN_RE = re.compile(r"(\w)-\n(\w)")
+_INLINE_PAGE_NUM_RE = re.compile(r"^\s*\d{1,4}\s*$", re.MULTILINE)
+
+# Non-content structural patterns to strip
+_STRUCTURAL_NOISE_RE = [
+    re.compile(r"^\s*(?:Figure|Table|Chart)\s+\d+[\.\:]?\s*$", re.MULTILINE | re.IGNORECASE),
+    re.compile(r"^\s*(?:Source|Note|Notes)\s*:\s*$", re.MULTILINE | re.IGNORECASE),
+]
+
 
 # ---------------------------------------------------------------------------
 # Extraction & Cleaning
@@ -100,19 +111,30 @@ _ARTIFACTS_RE = [
 
 def _clean_text(text: str) -> str:
     """
-    Advanced cleaning of formatting artifacts & OCR noise.
-    
+    Clean formatting artifacts, OCR noise, and PDF extraction quirks.
+
+    Handles: known artifacts, dehyphenation across line breaks,
+    Unicode ligature normalization, inline page numbers, and
+    structural noise lines.
+
     Args:
-        text: Raw text from PDF extraction
-        
+        text: Raw text from PDF extraction.
+
     Returns:
-        Cleaned text with artifacts removed
+        Cleaned text.
     """
-    # Strip known artifacts
     for pattern in _ARTIFACTS_RE:
         text = pattern.sub("", text)
-    
-    # Standard cleaning
+
+    text = unicodedata.normalize("NFKC", text)
+
+    text = _DEHYPHEN_RE.sub(r"\1\2", text)
+
+    text = _INLINE_PAGE_NUM_RE.sub("", text)
+
+    for pattern in _STRUCTURAL_NOISE_RE:
+        text = pattern.sub("", text)
+
     text = text.replace("\f", "\n")
     lines = [line.rstrip() for line in text.split("\n")]
     text = "\n".join(lines)
@@ -120,110 +142,286 @@ def _clean_text(text: str) -> str:
     return text.strip()
 
 
+def _extract_page_blocks_sorted(page: fitz.Page) -> str:
+    """
+    Extract text from a page using block-level bounding boxes to fix
+    multi-column reading order.
+
+    PyMuPDF's ``get_text("text")`` reads top-to-bottom which interleaves
+    columns. This function sorts text blocks by column position first
+    (left half vs right half), then top-to-bottom within each column.
+
+    Args:
+        page: A PyMuPDF page object.
+
+    Returns:
+        Concatenated text in corrected reading order.
+    """
+    blocks = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)["blocks"]
+    text_blocks = []
+    page_width = page.rect.width
+    mid_x = page_width / 2
+
+    for block in blocks:
+        if block["type"] != 0:
+            continue
+        lines_text = []
+        for line in block.get("lines", []):
+            spans_text = "".join(span.get("text", "") for span in line.get("spans", []))
+            if spans_text.strip():
+                lines_text.append(spans_text)
+        if lines_text:
+            block_x0 = block["bbox"][0]
+            block_y0 = block["bbox"][1]
+            col = 0 if block_x0 < mid_x else 1
+            text_blocks.append((col, block_y0, "\n".join(lines_text)))
+
+    text_blocks.sort(key=lambda b: (b[0], b[1]))
+    return "\n\n".join(t for _, _, t in text_blocks)
+
+
+def _detect_repeated_lines(
+    pages_text: List[str],
+    sample_size: int = 20,
+    threshold: float = 0.6,
+) -> set:
+    """
+    Detect header/footer/watermark lines that repeat across many pages.
+
+    Collects the first and last few lines of each page, then flags
+    any line appearing on more than ``threshold`` fraction of pages.
+
+    Args:
+        pages_text: List of raw page texts.
+        sample_size: How many pages to sample from start and end.
+        threshold: Fraction of pages a line must appear on to be flagged.
+
+    Returns:
+        Set of normalised line strings to strip.
+    """
+    if len(pages_text) < 4:
+        return set()
+
+    line_page_count: Counter = Counter()
+    total = len(pages_text)
+
+    for page_text in pages_text:
+        lines = page_text.split("\n")
+        edge_lines = set()
+        for line in lines[:3] + lines[-3:]:
+            normalised = line.strip().lower()
+            if len(normalised) > 3:
+                edge_lines.add(normalised)
+        for nl in edge_lines:
+            line_page_count[nl] += 1
+
+    min_count = int(total * threshold)
+    return {line for line, count in line_page_count.items() if count >= min_count}
+
+
 def extract_pages(pdf_path: str) -> List[PageRecord]:
     """
-    Memory-efficient PDF text extraction with error handling.
-    
+    PDF text extraction with multi-column fix and header/footer stripping.
+
+    Pipeline:
+      1. Extract text using block-level bounding boxes (fixes column order).
+      2. Detect repeated edge lines across pages (headers/footers/watermarks).
+      3. Strip detected repeated lines from each page.
+      4. Clean remaining artifacts via ``_clean_text``.
+
     Args:
-        pdf_path: Path to PDF file
-        
+        pdf_path: Path to PDF file.
+
     Returns:
-        List of PageRecord objects with cleaned text
-        
+        List of PageRecord objects with cleaned text.
+
     Raises:
-        FileNotFoundError: If PDF file doesn't exist
-        RuntimeError: If PDF extraction fails
+        FileNotFoundError: If PDF file doesn't exist.
+        RuntimeError: If PDF extraction fails.
     """
     pdf_path = Path(pdf_path)
     if not pdf_path.exists():
         raise FileNotFoundError(f"PDF not found: {pdf_path}")
 
-    records: List[PageRecord] = []
+    raw_texts: List[str] = []
     try:
         with fitz.open(str(pdf_path)) as doc:
             total_pages = len(doc)
-            logger.info(f"Extracting {total_pages} pages from PDF...")
-            
+            logger.info("Extracting %d pages from PDF...", total_pages)
+
             for page_idx in range(total_pages):
                 try:
-                    raw_text = doc[page_idx].get_text("text")
-                    records.append(PageRecord(
-                        page_number=page_idx + 1,
-                        text=_clean_text(raw_text)
-                    ))
-                except Exception as e:
-                    logger.warning(f"Failed to extract page {page_idx + 1}: {e}")
-                    # Add empty page record to maintain page numbering
-                    records.append(PageRecord(page_number=page_idx + 1, text=""))
-            
-            logger.info(f"✓ Extracted {len(records)} pages")
-            return records
-            
+                    raw_texts.append(_extract_page_blocks_sorted(doc[page_idx]))
+                except Exception:
+                    try:
+                        raw_texts.append(doc[page_idx].get_text("text"))
+                    except Exception as e:
+                        logger.warning("Failed to extract page %d: %s", page_idx + 1, e)
+                        raw_texts.append("")
+
     except Exception as e:
         raise RuntimeError(f"PDF extraction failed: {e}") from e
+
+    repeated = _detect_repeated_lines(raw_texts)
+    if repeated:
+        logger.info("Stripping %d repeated header/footer/watermark lines", len(repeated))
+
+    records: List[PageRecord] = []
+    for idx, text in enumerate(raw_texts):
+        if repeated:
+            lines = text.split("\n")
+            lines = [l for l in lines if l.strip().lower() not in repeated]
+            text = "\n".join(lines)
+        records.append(PageRecord(page_number=idx + 1, text=_clean_text(text)))
+
+    logger.info("Extracted %d pages", len(records))
+    return records
 
 
 # ---------------------------------------------------------------------------
 # Hierarchical Section Detection
 # ---------------------------------------------------------------------------
 
+_TOC_LINE_RE = re.compile(
+    r"^\s*\d{1,2}(?:\.\d{1,2})?\s+.{3,60}\.{2,}\s*\d{1,4}\s*$",
+    re.MULTILINE,
+)
+
+_BACKMATTER_RE = re.compile(
+    r"^\s*(Appendix|Glossary|Index|Bibliography|References|Works Cited)\b",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
+def _is_toc_page(text: str) -> bool:
+    """
+    Detect Table of Contents pages by counting lines that look like
+    "Section Title ......... 42".
+
+    Args:
+        text: Cleaned page text.
+
+    Returns:
+        True if the page is likely a TOC page.
+    """
+    toc_hits = len(_TOC_LINE_RE.findall(text))
+    total_lines = max(1, len([l for l in text.split("\n") if l.strip()]))
+    return toc_hits >= 3 and toc_hits / total_lines > 0.3
+
+
 def detect_sections(pages: List[PageRecord]) -> List[SectionBlock]:
     """
     Detect Chapter/Section hierarchy for better citation anchoring.
-    
+
+    Also:
+      - Skips pages detected as Table of Contents.
+      - Tags appendix/glossary/index sections with distinct chapter_id
+        so they can be filtered or down-weighted at retrieval time.
+
     Args:
-        pages: List of PageRecord objects
-        
+        pages: List of PageRecord objects.
+
     Returns:
-        List of SectionBlock objects with hierarchical metadata
+        List of SectionBlock objects with hierarchical metadata.
     """
     if not pages:
         logger.warning("No pages provided for section detection")
         return []
-    
+
+    filtered_pages: List[PageRecord] = []
+    toc_skipped = 0
+    for record in pages:
+        if _is_toc_page(record.text):
+            toc_skipped += 1
+            continue
+        filtered_pages.append(record)
+
+    if toc_skipped:
+        logger.info("Skipped %d Table of Contents pages", toc_skipped)
+
+    if not filtered_pages:
+        logger.warning("All pages were TOC — returning empty")
+        return []
+
     full_text_parts: List[str] = []
     offset_to_page: List[int] = []
 
-    for record in pages:
+    for record in filtered_pages:
         chunk = record.text + "\n\n"
         full_text_parts.append(chunk)
         offset_to_page.extend([record.page_number] * len(chunk))
 
     full_text = "".join(full_text_parts)
-    logger.info(f"Detecting sections in {len(full_text)} characters...")
+    logger.info("Detecting sections in %d characters...", len(full_text))
 
-    # Find Chapters and Sections
     chapters = list(_CHAPTER_RE.finditer(full_text))
     sections = list(_SECTION_RE.finditer(full_text))
-    
-    # Combine and sort markers by offset
+
     markers = []
     for m in chapters:
         markers.append({"type": "chapter", "match": m, "offset": m.start()})
     for m in sections:
         markers.append({"type": "section", "match": m, "offset": m.start()})
-    
+
+    backmatter = list(_BACKMATTER_RE.finditer(full_text))
+    for m in backmatter:
+        markers.append({"type": "backmatter", "match": m, "offset": m.start()})
+
     markers.sort(key=lambda x: x["offset"])
 
     if not markers:
         return [SectionBlock(
             chapter_id="0", section_id="0.0", section_title="Full Text",
-            page_start=1, page_end=pages[-1].page_number, text=full_text
+            page_start=1, page_end=filtered_pages[-1].page_number, text=full_text
         )]
 
     blocks: List[SectionBlock] = []
     current_chapter = "0"
+    in_backmatter = False
+
+    first_offset = markers[0]["offset"]
+    if first_offset > 100:
+        preface_text = full_text[:first_offset].strip()
+        if preface_text:
+            p_start = offset_to_page[0]
+            p_end = offset_to_page[min(first_offset, len(offset_to_page) - 1)]
+            blocks.append(SectionBlock(
+                chapter_id="0",
+                section_id="0.0",
+                section_title="Preface",
+                page_start=p_start,
+                page_end=p_end,
+                text=preface_text,
+            ))
+            logger.info("Captured %d chars of pre-chapter text as Preface", len(preface_text))
 
     for i, marker in enumerate(markers):
         start = marker["offset"]
         end = markers[i+1]["offset"] if i+1 < len(markers) else len(full_text)
         text = full_text[start:end].strip()
-        
+
         match = marker["match"]
+
+        if marker["type"] == "backmatter":
+            in_backmatter = True
+            bm_title = match.group(1).strip().title()
+            current_chapter = f"BM_{bm_title}"
+            section_id = f"{current_chapter}.0"
+            p_start = offset_to_page[start]
+            p_end = offset_to_page[min(end, len(offset_to_page)-1)]
+            blocks.append(SectionBlock(
+                chapter_id=current_chapter,
+                section_id=section_id,
+                section_title=bm_title,
+                page_start=p_start,
+                page_end=p_end,
+                text=text,
+            ))
+            continue
+
         if marker["type"] == "chapter":
             current_chapter = match.group(1)
-            # Create a block for chapter intro text (before first section)
-            # Only if there's substantial text before next marker
+            in_backmatter = False
             if i+1 < len(markers) and end - start > 100:
                 section_id = f"{current_chapter}.0"
                 section_title = f"Chapter {current_chapter} Introduction"
@@ -235,13 +433,13 @@ def detect_sections(pages: List[PageRecord]) -> List[SectionBlock]:
                     section_title=section_title,
                     page_start=p_start,
                     page_end=p_end,
-                    text=text
+                    text=text,
                 ))
             continue
-        
+
         section_id = match.group(1)
         section_title = f"{section_id} {match.group(2).strip()}"
-        
+
         p_start = offset_to_page[start]
         p_end = offset_to_page[min(end, len(offset_to_page)-1)]
 
@@ -251,7 +449,7 @@ def detect_sections(pages: List[PageRecord]) -> List[SectionBlock]:
             section_title=section_title,
             page_start=p_start,
             page_end=p_end,
-            text=text
+            text=text,
         ))
 
     return blocks

@@ -38,7 +38,10 @@ using ONLY the provided context passages.
 Rules:
 - Base your answer strictly on the context below.
 - Cite sources using [1], [2], etc. matching the numbered passages.
-- If the context does not contain enough information, say so clearly.
+- If the context does not contain enough information, say so clearly and \
+state which aspects of the question you cannot fully address.
+- If passages contain contradictory information, note the contradiction \
+explicitly and cite both sources so the user can evaluate.
 - Do not fabricate information.
 
 Formatting (you MUST follow these rules):
