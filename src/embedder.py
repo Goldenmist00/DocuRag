@@ -1,7 +1,7 @@
 """
 embedder.py
 ===========
-Embedding via NVIDIA API (nvidia/nv-embed-v1, 4096d).
+Embedding via NVIDIA API (baai/bge-m3, 1024d).
 No local model — fast API-based embedding.
 """
 
@@ -23,11 +23,11 @@ from src.pdf_processor import Chunk
 
 _CACHE_FILE = "embeddings_cache.npz"
 _NVIDIA_EMBED_URL = "https://integrate.api.nvidia.com/v1/embeddings"
-_NVIDIA_MODEL = "nvidia/nv-embed-v1"
-_NVIDIA_DIM = 4096
-_NVIDIA_BATCH_SIZE = 48   # texts per API request (smaller = less retry surface)
-_NVIDIA_MAX_CHARS  = 2000 # truncate before sending (nv-embed-v1 ~512 tokens)
-_NVIDIA_WORKERS    = 12   # concurrent API requests
+_NVIDIA_MODEL = "baai/bge-m3"
+_NVIDIA_DIM = 1024
+_NVIDIA_BATCH_SIZE = 48
+_NVIDIA_MAX_CHARS  = 8000  # bge-m3 supports 8192 tokens
+_NVIDIA_WORKERS    = 12
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ TIER_CONFIGS = {
     EmbeddingTier.NVIDIA: {
         "model_name": _NVIDIA_MODEL,
         "dimensions": _NVIDIA_DIM,
-        "description": "NVIDIA nv-embed-v1 — 4096d, API-based",
+        "description": "BAAI bge-m3 — 1024d, API-based via NVIDIA NIM",
     },
 }
 # Legacy aliases resolve to NVIDIA config
@@ -54,7 +54,7 @@ for _t in (EmbeddingTier.FAST, EmbeddingTier.BALANCED, EmbeddingTier.DEEP):
 
 class Embedder:
     """
-    API-based embedder using NVIDIA nv-embed-v1 (4096d).
+    API-based embedder using BAAI bge-m3 (1024d) via NVIDIA NIM.
     Requires NVIDIA_EMBED_API_KEY or NVIDIA_API_KEY in environment.
     """
 
@@ -211,7 +211,7 @@ class Embedder:
                            invoked after each API batch completes.
 
         Returns:
-            (N, 4096) float32 array.
+            (N, 1024) float32 array.
         """
         if not texts:
             return np.array([])

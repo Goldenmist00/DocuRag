@@ -194,7 +194,7 @@ export async function askQuestion(
   notebookId?: string
 ): Promise<QueryResponse> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 60000);
+  const timeout = setTimeout(() => controller.abort(), 120000);
 
   const url = notebookId
     ? `${API_BASE}/notebooks/${notebookId}/query`

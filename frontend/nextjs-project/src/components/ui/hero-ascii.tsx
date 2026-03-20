@@ -2,10 +2,56 @@
 
 import Image from 'next/image';
 import Link from 'next/link';
-import { useEffect } from 'react';
-import { BookOpen, Search, ShieldCheck, LayoutDashboard, Sparkles } from 'lucide-react';
+import { useEffect, useRef, memo } from 'react';
+import { BookOpen, ShieldCheck, LayoutDashboard, Sparkles } from 'lucide-react';
 
-export default function HeroAscii() {
+const BRANDING_STYLE = `
+  [data-us-project] {
+    position: relative !important;
+    overflow: hidden !important;
+  }
+  [data-us-project] canvas {
+    clip-path: inset(0 0 10% 0) !important;
+    will-change: transform;
+  }
+  [data-us-project] * {
+    pointer-events: none !important;
+  }
+  [data-us-project] a[href*="unicorn"],
+  [data-us-project] button[title*="unicorn"],
+  [data-us-project] div[title*="Made with"],
+  [data-us-project] .unicorn-brand,
+  [data-us-project] [class*="brand"],
+  [data-us-project] [class*="credit"],
+  [data-us-project] [class*="watermark"] {
+    display: none !important;
+    visibility: hidden !important;
+    opacity: 0 !important;
+    position: absolute !important;
+    left: -9999px !important;
+    top: -9999px !important;
+  }
+`;
+
+/**
+ * Removes UnicornStudio branding elements from the project embed.
+ * Scans only direct children to avoid deep DOM traversals.
+ */
+function hideBranding() {
+  const projectDiv = document.querySelector('[data-us-project]');
+  if (!projectDiv) return;
+  const allElements = projectDiv.querySelectorAll('a, button, div, span');
+  allElements.forEach(el => {
+    const text = (el.textContent || '').toLowerCase();
+    if (text.includes('made with') || text.includes('unicorn')) {
+      el.remove();
+    }
+  });
+}
+
+function HeroAscii() {
+  const observerRef = useRef<MutationObserver | null>(null);
+
   useEffect(() => {
     const embedScript = document.createElement('script');
     embedScript.type = 'text/javascript';
@@ -25,55 +71,35 @@ export default function HeroAscii() {
     document.head.appendChild(embedScript);
 
     const style = document.createElement('style');
-    style.textContent = `
-      [data-us-project] {
-        position: relative !important;
-        overflow: hidden !important;
-      }
-      [data-us-project] canvas {
-        clip-path: inset(0 0 10% 0) !important;
-      }
-      [data-us-project] * {
-        pointer-events: none !important;
-      }
-      [data-us-project] a[href*="unicorn"],
-      [data-us-project] button[title*="unicorn"],
-      [data-us-project] div[title*="Made with"],
-      [data-us-project] .unicorn-brand,
-      [data-us-project] [class*="brand"],
-      [data-us-project] [class*="credit"],
-      [data-us-project] [class*="watermark"] {
-        display: none !important;
-        visibility: hidden !important;
-        opacity: 0 !important;
-        position: absolute !important;
-        left: -9999px !important;
-        top: -9999px !important;
-      }
-    `;
+    style.textContent = BRANDING_STYLE;
     document.head.appendChild(style);
 
-    const hideBranding = () => {
-      const projectDiv = document.querySelector('[data-us-project]');
-      if (projectDiv) {
-        const allElements = projectDiv.querySelectorAll('*');
-        allElements.forEach(el => {
-          const text = (el.textContent || '').toLowerCase();
-          if (text.includes('made with') || text.includes('unicorn')) {
-            el.remove();
-          }
-        });
-      }
-    };
-
     hideBranding();
-    const interval = setInterval(hideBranding, 100);
-    setTimeout(hideBranding, 1000);
-    setTimeout(hideBranding, 3000);
-    setTimeout(hideBranding, 5000);
+    const t1 = setTimeout(hideBranding, 1000);
+    const t2 = setTimeout(hideBranding, 3000);
+
+    const projectDiv = document.querySelector('[data-us-project]');
+    if (projectDiv) {
+      observerRef.current = new MutationObserver(() => {
+        hideBranding();
+      });
+      observerRef.current.observe(projectDiv, { childList: true, subtree: true });
+    }
+
+    const retryObserver = setTimeout(() => {
+      const el = document.querySelector('[data-us-project]');
+      if (el && !observerRef.current) {
+        observerRef.current = new MutationObserver(() => hideBranding());
+        observerRef.current.observe(el, { childList: true, subtree: true });
+        hideBranding();
+      }
+    }, 2000);
 
     return () => {
-      clearInterval(interval);
+      clearTimeout(t1);
+      clearTimeout(t2);
+      clearTimeout(retryObserver);
+      observerRef.current?.disconnect();
       if (document.head.contains(embedScript)) document.head.removeChild(embedScript);
       if (document.head.contains(style)) document.head.removeChild(style);
     };
@@ -113,17 +139,13 @@ export default function HeroAscii() {
               <Sparkles size={16} className="opacity-50" />
               Features
             </Link>
-            <Link href="#features" className="flex items-center gap-2.5 px-5 py-2.5 rounded-md text-sm tracking-[0.12em] uppercase text-white/40 hover:text-white/80 hover:bg-white/[0.04] transition-all duration-200">
-              <Search size={16} className="opacity-50" />
-              Search
+            <Link href="#citations" className="flex items-center gap-2.5 px-5 py-2.5 rounded-md text-sm tracking-[0.12em] uppercase text-white/40 hover:text-white/80 hover:bg-white/[0.04] transition-all duration-200">
+              <ShieldCheck size={16} className="opacity-50" />
+              Citations
             </Link>
             <Link href="#cta" className="flex items-center gap-2.5 px-5 py-2.5 rounded-md text-sm tracking-[0.12em] uppercase text-white/40 hover:text-white/80 hover:bg-white/[0.04] transition-all duration-200">
               <BookOpen size={16} className="opacity-50" />
               Get Started
-            </Link>
-            <Link href="#features" className="flex items-center gap-2.5 px-5 py-2.5 rounded-md text-sm tracking-[0.12em] uppercase text-white/40 hover:text-white/80 hover:bg-white/[0.04] transition-all duration-200">
-              <ShieldCheck size={16} className="opacity-50" />
-              Citations
             </Link>
             <div className="w-px h-6 bg-white/[0.08] mx-3" />
             <Link href="/signup" className="flex items-center gap-2.5 px-6 py-2.5 rounded-md text-sm tracking-[0.12em] uppercase bg-white text-[#060609] font-semibold hover:bg-white/90 transition-all duration-200">
@@ -246,3 +268,5 @@ export default function HeroAscii() {
     </section>
   );
 }
+
+export default memo(HeroAscii);
