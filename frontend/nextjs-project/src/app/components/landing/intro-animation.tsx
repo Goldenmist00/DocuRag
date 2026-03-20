@@ -1,10 +1,12 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useRef, useState, memo } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import Image from "next/image"
 
-function Particle({ x, y, size, delay, duration }: { x: number; y: number; size: number; delay: number; duration: number }) {
+const PARTICLE_COUNT = 12;
+
+const Particle = memo(function Particle({ x, y, size, delay, duration }: { x: number; y: number; size: number; delay: number; duration: number }) {
   return (
     <motion.div
       style={{
@@ -14,15 +16,16 @@ function Particle({ x, y, size, delay, duration }: { x: number; y: number; size:
         borderRadius: "50%",
         background: "radial-gradient(circle, rgba(255,255,255,0.6) 0%, rgba(255,255,255,0.1) 60%, transparent 100%)",
         pointerEvents: "none",
+        willChange: "transform, opacity",
       }}
       initial={{ opacity: 0, scale: 0 }}
       animate={{ opacity: [0, 0.5, 0.2, 0.5, 0], scale: [0, 1, 0.8, 1, 0], y: [0, -30, -60] }}
-      transition={{ duration, delay, ease: "easeOut", repeat: Infinity, repeatDelay: Math.random() * 2 }}
+      transition={{ duration, delay, ease: "easeOut", repeat: Infinity, repeatDelay: 1.5 }}
     />
   )
-}
+})
 
-function GridOverlay() {
+const GridOverlay = memo(function GridOverlay() {
   return (
     <svg style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0.03, pointerEvents: "none" }}>
       <defs>
@@ -33,9 +36,9 @@ function GridOverlay() {
       <rect width="100%" height="100%" fill="url(#grid)" />
     </svg>
   )
-}
+})
 
-function RingPulse({ delay }: { delay: number }) {
+const RingPulse = memo(function RingPulse({ delay }: { delay: number }) {
   return (
     <motion.div
       style={{
@@ -45,13 +48,14 @@ function RingPulse({ delay }: { delay: number }) {
         border: "1px solid rgba(255,255,255,0.12)",
         transform: "translate(-50%, -50%)",
         pointerEvents: "none",
+        willChange: "transform, opacity",
       }}
       initial={{ scale: 0.3, opacity: 0 }}
       animate={{ scale: [0.3, 2.5], opacity: [0.4, 0] }}
       transition={{ duration: 2.5, delay, ease: "easeOut", repeat: Infinity, repeatDelay: 1 }}
     />
   )
-}
+})
 
 export function IntroAnimation({ onComplete }: { onComplete: () => void }) {
   const [visible, setVisible] = useState(true)
@@ -59,7 +63,7 @@ export function IntroAnimation({ onComplete }: { onComplete: () => void }) {
   const called = useRef(false)
 
   const particles = useRef(
-    Array.from({ length: 24 }, (_, i) => ({
+    Array.from({ length: PARTICLE_COUNT }, (_, i) => ({
       x: 5 + (i * 37.3) % 90,
       y: 5 + (i * 53.7) % 90,
       size: 2 + (i % 3),
@@ -144,6 +148,7 @@ export function IntroAnimation({ onComplete }: { onComplete: () => void }) {
                   position: "relative", zIndex: 1,
                   width: 120, height: 120,
                   display: "flex", alignItems: "center", justifyContent: "center",
+                  willChange: "filter",
                 }}
                 animate={{
                   filter: [
@@ -152,7 +157,7 @@ export function IntroAnimation({ onComplete }: { onComplete: () => void }) {
                     "drop-shadow(0 0 20px rgba(255,255,255,0.1))",
                   ],
                 }}
-                transition={{ duration: 2.5, repeat: Infinity }}
+                transition={{ duration: 3.5, repeat: Infinity }}
               >
                 <Image
                   src="/logo.png"

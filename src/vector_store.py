@@ -99,6 +99,11 @@ class PgVectorStore:
             "user":     os.environ.get("POSTGRES_USER",     user),
             "password": resolved_password,
             "sslmode":  os.environ.get("POSTGRES_SSLMODE",  "require"),
+            "connect_timeout":     10,
+            "keepalives":          1,
+            "keepalives_idle":     30,
+            "keepalives_interval": 10,
+            "keepalives_count":    3,
         }
 
         try:
@@ -162,11 +167,21 @@ class PgVectorStore:
     def _connection(self) -> Generator:
         """
         Yield a pooled connection with automatic commit / rollback.
+        Replaces stale connections before yielding.
         Retry logic is handled at the call site via _with_retry().
         """
         conn = None
         try:
             conn = self._pool.getconn()
+            if conn.closed:
+                self._pool.putconn(conn, close=True)
+                conn = self._pool.getconn()
+            try:
+                conn.isolation_level
+            except psycopg2.OperationalError:
+                logger.warning("Stale vector_store connection, replacing")
+                self._pool.putconn(conn, close=True)
+                conn = self._pool.getconn()
             register_vector(conn)
             yield conn
             conn.commit()
@@ -200,19 +215,57 @@ class PgVectorStore:
         raise last_exc
 
     def _ensure_table(self) -> None:
-        """Create the chunks table and pgvector extension if they don't exist."""
-        # pgvector can only index vector columns up to 2000d.
-        # For higher dims (e.g. nv-embed-v1 at 4096d), store as halfvec.
+        """
+        Create the chunks table and pgvector extension if they don't exist.
+        If the table exists but the embedding column has a different type
+        (e.g. halfvec(4096) from a previous model), drop and recreate.
+        """
         col_type = f"halfvec({self.embedding_dim})" if self.embedding_dim > 2000 else f"vector({self.embedding_dim})"
         with self._connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+                cur.execute("""
+                    SELECT data_type, udt_name
+                    FROM information_schema.columns
+                    WHERE table_name = %s AND column_name = 'embedding'
+                """, (self.table_name,))
+                row = cur.fetchone()
+                needs_recreate = False
+                if row is not None:
+                    cur.execute(f"""
+                        SELECT pg_catalog.format_type(atttypid, atttypmod)
+                        FROM pg_attribute
+                        WHERE attrelid = %s::regclass AND attname = 'embedding'
+                    """, (self.table_name,))
+                    current_type = (cur.fetchone() or [None])[0]
+                    if current_type and current_type != col_type:
+                        logger.warning(
+                            "Embedding column type mismatch: %s → %s.",
+                            current_type, col_type,
+                        )
+                        needs_recreate = True
+
+                    cur.execute("""
+                        SELECT column_name FROM information_schema.columns
+                        WHERE table_name = %s AND column_name IN ('notebook_id', 'source_id')
+                    """, (self.table_name,))
+                    existing_cols = {r[0] for r in cur.fetchall()}
+                    if not {"notebook_id", "source_id"}.issubset(existing_cols):
+                        logger.warning("Table missing notebook_id/source_id columns.")
+                        needs_recreate = True
+
+                if needs_recreate:
+                    logger.warning("Dropping table %s to recreate.", self.table_name)
+                    cur.execute(f"DROP TABLE IF EXISTS {self.table_name} CASCADE")
+
                 cur.execute(f"""
                     CREATE TABLE IF NOT EXISTS {self.table_name} (
                         id            BIGSERIAL PRIMARY KEY,
                         chunk_id      TEXT        NOT NULL UNIQUE,
                         text          TEXT        NOT NULL,
                         embedding     {col_type},
+                        notebook_id   TEXT,
+                        source_id     TEXT,
                         section_id    TEXT,
                         chapter_id    TEXT,
                         section_title TEXT,
@@ -457,6 +510,7 @@ class PgVectorStore:
         try:
             with self._connection() as conn:
                 with conn.cursor() as cur:
+                    cur.execute("SET LOCAL statement_timeout = '45s'")
                     if needs_halfvec:
                         cur.execute(
                             f"""

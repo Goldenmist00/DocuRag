@@ -74,8 +74,8 @@ class Chunk(BaseModel):
 # Constants & Regex
 # ---------------------------------------------------------------------------
 
-DEFAULT_CHUNK_SIZE    = 800
-DEFAULT_CHUNK_OVERLAP = 100
+DEFAULT_CHUNK_SIZE    = 2000
+DEFAULT_CHUNK_OVERLAP = 200
 DEFAULT_MIN_CHUNK     = 150
 
 # Regex for Chapters: "Chapter 1 Introduction"

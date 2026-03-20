@@ -1,8 +1,10 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback, Suspense } from "react";
+import { useState, useRef, useEffect, useCallback, Suspense, useMemo } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
+import ReactMarkdown, { type Components } from "react-markdown";
+import rehypeRaw from "rehype-raw";
 import {
   askQuestion,
   listSources,
@@ -70,7 +72,7 @@ const isTerminalStatus = (status: string) => status === "ready" || status === "e
 
 /* ─── types ─── */
 type SourceAttribution = { name: string; pages: number[] };
-type Message = { id: number; role: "user" | "ai"; text: string; sourceAttrs?: SourceAttribution[] };
+type Message = { id: number; role: "user" | "ai"; text: string; sourceAttrs?: SourceAttribution[]; attachments?: string[] };
 type StudioView = "home" | "flashcards" | "mindmap" | "summary" | "quiz";
 
 /* ─── sample data ─── */
@@ -324,6 +326,119 @@ function SourceRow({ source: s, onDelete }: {
   );
 }
 
+/* ─── Markdown-rendered AI message ─── */
+
+const CITATION_RE = /\[(\d+)\]/g;
+
+/**
+ * Pre-processes raw AI text to wrap [1], [2] citation markers
+ * in styled <cite> tags before markdown parsing.
+ */
+function injectCitationMarkup(text: string): string {
+  return text.replace(
+    CITATION_RE,
+    '<cite data-ref="$1">[$1]</cite>'
+  );
+}
+
+const MD_COMPONENTS: Components = {
+  h3: ({ children }) => (
+    <h3 style={{
+      fontSize: "0.92rem", fontWeight: 700,
+      color: "rgba(255,255,255,0.92)",
+      marginTop: 18, marginBottom: 8,
+      letterSpacing: "0.015em",
+      borderBottom: "1px solid rgba(255,255,255,0.06)",
+      paddingBottom: 6,
+    }}>{children}</h3>
+  ),
+  p: ({ children }) => (
+    <p style={{
+      marginBottom: 10, lineHeight: 1.8,
+      color: "rgba(255,255,255,0.8)",
+      fontSize: "0.86rem",
+    }}>{children}</p>
+  ),
+  strong: ({ children }) => (
+    <strong style={{ color: "#fff", fontWeight: 600 }}>{children}</strong>
+  ),
+  em: ({ children }) => (
+    <em style={{ color: "rgba(255,255,255,0.65)", fontStyle: "italic" }}>{children}</em>
+  ),
+  ul: ({ children }) => (
+    <ul style={{
+      paddingLeft: 18, marginBottom: 10,
+      listStyleType: "disc",
+    }}>{children}</ul>
+  ),
+  ol: ({ children }) => (
+    <ol style={{
+      paddingLeft: 18, marginBottom: 10,
+    }}>{children}</ol>
+  ),
+  li: ({ children }) => (
+    <li style={{
+      marginBottom: 5, lineHeight: 1.75,
+      color: "rgba(255,255,255,0.78)",
+      fontSize: "0.85rem",
+    }}>{children}</li>
+  ),
+  code: ({ children }) => (
+    <code style={{
+      padding: "2px 6px", borderRadius: 4,
+      background: "rgba(255,255,255,0.06)",
+      fontSize: "0.82em",
+      color: "rgba(140,175,255,0.9)",
+      fontFamily: "var(--font-hero-mono, monospace)",
+    }}>{children}</code>
+  ),
+  cite: ({ children, ...props }) => {
+    const ref = (props as Record<string, string>)["data-ref"];
+    return (
+      <span
+        title={`Source [${ref}]`}
+        style={{
+          display: "inline-flex", alignItems: "center", justifyContent: "center",
+          fontSize: "0.7em", fontWeight: 700, fontStyle: "normal",
+          color: "rgba(140,175,255,0.9)",
+          background: "rgba(91,138,240,0.1)",
+          border: "1px solid rgba(91,138,240,0.18)",
+          borderRadius: 4,
+          padding: "1px 5px",
+          marginLeft: 2, marginRight: 1,
+          verticalAlign: "super",
+          lineHeight: 1,
+          cursor: "default",
+        }}
+      >
+        {children}
+      </span>
+    );
+  },
+};
+
+/**
+ * Renders AI answer text with markdown formatting and styled citation badges.
+ */
+function MarkdownMessage({ text }: { text: string }) {
+  const processed = useMemo(() => injectCitationMarkup(text), [text]);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      <ReactMarkdown
+        components={MD_COMPONENTS}
+        rehypePlugins={[rehypeRaw]}
+        allowedElements={[
+          "p", "h3", "strong", "em", "ul", "ol", "li", "code", "pre",
+          "br", "hr", "blockquote", "cite", "span",
+        ]}
+        unwrapDisallowed
+      >
+        {processed}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
 /* ─── Chat area ─── */
 function ChatArea({ isNew, notebookId, onUploadFiles }: { isNew: boolean; notebookId: string | null; onUploadFiles?: (files: File[]) => void }) {
   const [messages, setMessages] = useState<Message[]>(EMPTY_MESSAGES);
@@ -331,7 +446,9 @@ function ChatArea({ isNew, notebookId, onUploadFiles }: { isNew: boolean; notebo
   const [loading, setLoading] = useState(false);
   const [draggingOver, setDraggingOver] = useState(false);
   const [droppedFiles, setDroppedFiles] = useState<string[]>([]);
+  const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
   const chatFileRef = useRef<HTMLInputElement>(null);
+  const attachRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const dragCounter = useRef(0);
 
@@ -354,14 +471,59 @@ function ChatArea({ isNew, notebookId, onUploadFiles }: { isNew: boolean; notebo
     }));
   };
 
+  /**
+   * Handles attaching PDF/JSON files from the inline attachment button.
+   * Prevents duplicates by checking filename.
+   */
+  const handleAttach = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      const newFiles = Array.from(e.target.files);
+      setAttachedFiles(prev => {
+        const existing = new Set(prev.map(f => f.name));
+        return [...prev, ...newFiles.filter(f => !existing.has(f.name))];
+      });
+    }
+    e.target.value = "";
+  };
+
+  /**
+   * Remove a single attached file by index.
+   */
+  const removeAttachment = (index: number) => {
+    setAttachedFiles(prev => prev.filter((_, i) => i !== index));
+  };
+
+  /**
+   * Send message with optional file attachments.
+   * Uploads attached files as notebook sources first, then asks the question.
+   */
   const send = async () => {
-    if (!input.trim() || loading) return;
-    const userMsg: Message = { id: Date.now(), role: "user", text: input };
+    if ((!input.trim() && attachedFiles.length === 0) || loading) return;
+    const fileNames = attachedFiles.map(f => f.name);
+    const questionText = input.trim();
+    const userMsg: Message = {
+      id: Date.now(),
+      role: "user",
+      text: questionText || `Analyze ${fileNames.join(", ")}`,
+      attachments: fileNames.length > 0 ? fileNames : undefined,
+    };
     setMessages(p => [...p, userMsg]);
     setInput("");
+    const filesToUpload = [...attachedFiles];
+    setAttachedFiles([]);
     setLoading(true);
     try {
-      const result = await askQuestion(input, 10, notebookId ?? undefined);
+      if (filesToUpload.length > 0 && notebookId) {
+        onUploadFiles?.(filesToUpload);
+        await Promise.all(
+          filesToUpload.map(f => uploadSourceWithProgress(notebookId, f))
+        );
+      }
+      const result = await askQuestion(
+        questionText || `Summarize and analyze the uploaded files: ${fileNames.join(", ")}`,
+        10,
+        notebookId ?? undefined,
+      );
       const attrs = buildAttrs(result.sources);
       const aiMsg: Message = { id: Date.now() + 1, role: "ai", text: result.answer, sourceAttrs: attrs };
       setMessages(p => [...p, aiMsg]);
@@ -437,6 +599,7 @@ function ChatArea({ isNew, notebookId, onUploadFiles }: { isNew: boolean; notebo
       )}
 
       <input type="file" ref={chatFileRef} style={{ display: "none" }} multiple accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,.mp3,.mp4" onChange={handleChatFileChange} />
+      <input type="file" ref={attachRef} style={{ display: "none" }} multiple accept=".pdf,.json" onChange={handleAttach} />
 
       {/* Messages */}
       <div style={{ flex: 1, overflowY: "auto", padding: "24px 0" }}>
@@ -519,15 +682,33 @@ function ChatArea({ isNew, notebookId, onUploadFiles }: { isNew: boolean; notebo
               )}
               <div style={{
                 maxWidth: "78%",
-                padding: "10px 14px",
+                padding: m.role === "ai" ? "12px 16px" : "10px 14px",
                 borderRadius: m.role === "user" ? "12px 12px 4px 12px" : "4px 12px 12px 12px",
-                background: m.role === "user" ? "#111" : "transparent",
-                border: `1px solid ${m.role === "user" ? "#222" : "transparent"}`,
+                background: m.role === "user" ? "#111" : "rgba(255,255,255,0.02)",
+                border: `1px solid ${m.role === "user" ? "#222" : "rgba(255,255,255,0.05)"}`,
                 fontSize: "0.86rem",
                 color: "rgba(255,255,255,0.85)",
                 lineHeight: 1.65,
               }}>
-                {m.text}
+                {m.role === "user" && m.attachments && m.attachments.length > 0 && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 6 }}>
+                    {m.attachments.map((name, ai) => (
+                      <span key={ai} style={{
+                        display: "inline-flex", alignItems: "center", gap: 4,
+                        padding: "3px 8px", borderRadius: 5,
+                        background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)",
+                        fontSize: "0.68rem", color: "rgba(255,255,255,0.6)",
+                      }}>
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" style={{ flexShrink: 0 }}>
+                          <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                          <path d="M14 2v6h6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                        {name}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {m.role === "ai" ? <MarkdownMessage text={m.text} /> : m.text}
               </div>
               {/* Source attribution badges */}
               {m.role === "ai" && m.sourceAttrs && m.sourceAttrs.length > 0 && (
@@ -576,35 +757,83 @@ function ChatArea({ isNew, notebookId, onUploadFiles }: { isNew: boolean; notebo
 
       {/* Input */}
       <div style={{ padding: "10px 20px 16px", borderTop: "1px solid #1a1a1a", flexShrink: 0, background: "transparent" }}>
-        <div style={{ maxWidth: 680, margin: "0 auto", display: "flex", gap: 8, alignItems: "flex-end", background: "#0a0a0a", border: "1px solid #222", borderRadius: 10, padding: "8px 10px" }}>
-          <textarea
-            value={input}
-            onChange={e => setInput(e.target.value)}
-            onKeyDown={e => e.key === "Enter" && !e.shiftKey && (e.preventDefault(), send())}
-            placeholder="Ask anything about your sources…"
-            rows={1}
-            style={{
-              flex: 1, background: "transparent", border: "none", outline: "none",
-              color: "rgba(255,255,255,0.88)", fontSize: "0.875rem", fontFamily: "inherit",
-              resize: "none", lineHeight: 1.6,
-            }}
-          />
-          <button
-            onClick={send}
-            disabled={!input.trim() || loading}
-            style={{
-              width: 30, height: 30, borderRadius: "50%", border: "none",
-              background: input.trim() && !loading ? "#fff" : "#1a1a1a",
-              cursor: input.trim() && !loading ? "pointer" : "not-allowed",
-              display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
-              transition: "background 0.15s",
-            }}
-          >
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none">
-              <line x1="22" y1="2" x2="11" y2="13" stroke={input.trim() && !loading ? "#000" : "rgba(255,255,255,0.2)"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-              <polygon points="22 2 15 22 11 13 2 9 22 2" stroke={input.trim() && !loading ? "#000" : "rgba(255,255,255,0.2)"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
-            </svg>
-          </button>
+        <div style={{ maxWidth: 680, margin: "0 auto" }}>
+          {/* Attached file chips */}
+          {attachedFiles.length > 0 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+              {attachedFiles.map((file, i) => (
+                <div key={`${file.name}-${i}`} style={{
+                  display: "inline-flex", alignItems: "center", gap: 6,
+                  padding: "5px 10px", borderRadius: 6,
+                  background: "rgba(91,138,240,0.08)", border: "1px solid rgba(91,138,240,0.18)",
+                  fontSize: "0.72rem", color: "rgba(140,175,255,0.9)",
+                }}>
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" style={{ flexShrink: 0 }}>
+                    <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                    <path d="M14 2v6h6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                  <span style={{ maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{file.name}</span>
+                  <button onClick={() => removeAttachment(i)} style={{
+                    background: "none", border: "none", cursor: "pointer", padding: 0,
+                    color: "rgba(140,175,255,0.5)", display: "flex", alignItems: "center",
+                  }}>
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none">
+                      <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
+                    </svg>
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div style={{ display: "flex", gap: 8, alignItems: "flex-end", background: "#0a0a0a", border: "1px solid #222", borderRadius: 10, padding: "8px 10px" }}>
+            {/* Paperclip attachment button */}
+            <button
+              onClick={() => attachRef.current?.click()}
+              title="Attach PDF or JSON"
+              style={{
+                width: 30, height: 30, borderRadius: 6, border: "none",
+                background: "transparent", cursor: "pointer",
+                display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+                transition: "background 0.15s",
+              }}
+              className="action-btn"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"
+                  stroke="rgba(255,255,255,0.35)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+
+            <textarea
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && !e.shiftKey && (e.preventDefault(), send())}
+              placeholder={attachedFiles.length > 0 ? "Ask about the attached files…" : "Ask anything about your sources…"}
+              rows={1}
+              style={{
+                flex: 1, background: "transparent", border: "none", outline: "none",
+                color: "rgba(255,255,255,0.88)", fontSize: "0.875rem", fontFamily: "inherit",
+                resize: "none", lineHeight: 1.6,
+              }}
+            />
+            <button
+              onClick={send}
+              disabled={(!input.trim() && attachedFiles.length === 0) || loading}
+              style={{
+                width: 30, height: 30, borderRadius: "50%", border: "none",
+                background: (input.trim() || attachedFiles.length > 0) && !loading ? "#fff" : "#1a1a1a",
+                cursor: (input.trim() || attachedFiles.length > 0) && !loading ? "pointer" : "not-allowed",
+                display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+                transition: "background 0.15s",
+              }}
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none">
+                <line x1="22" y1="2" x2="11" y2="13" stroke={(input.trim() || attachedFiles.length > 0) && !loading ? "#000" : "rgba(255,255,255,0.2)"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                <polygon points="22 2 15 22 11 13 2 9 22 2" stroke={(input.trim() || attachedFiles.length > 0) && !loading ? "#000" : "rgba(255,255,255,0.2)"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+              </svg>
+            </button>
+          </div>
         </div>
       </div>
     </div>
