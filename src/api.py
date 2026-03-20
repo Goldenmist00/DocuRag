@@ -56,7 +56,9 @@ from src.generator import Generator
 from src.retriever import Retriever, RetrievedChunk, create_retriever
 from src.vector_store import PgVectorStore
 from src.services import notebook_service, source_service, podcast_service
-from src.db import podcast_db, chunk_db
+from src.services import batch_query_service
+from src.db import podcast_db, chunk_db, chunk_graph_db
+from src.services.answer_validator import AnswerValidator
 from services import summaryService, quizService, mindMapService, flashcardService
 
 logger = logging.getLogger(__name__)
@@ -102,6 +104,16 @@ class ChunkResult(BaseModel):
     source_name: str = ""
 
 
+class AnswerGradeResponse(BaseModel):
+    """Quality grade for a generated answer."""
+    faithfulness: float = 0.0
+    completeness: float = 0.0
+    citation_accuracy: float = 0.0
+    overall: float = 0.0
+    passed: bool = True
+    issues: List[str] = []
+
+
 class QueryResponse(BaseModel):
     """Response body for query endpoints."""
     question: str
@@ -110,6 +122,26 @@ class QueryResponse(BaseModel):
     chunks_used: int
     latency_ms: float
     sources: List[ChunkResult]
+    grade: Optional[AnswerGradeResponse] = None
+
+
+class BatchQueryResult(BaseModel):
+    """One question's result within a batch."""
+    question: str
+    answer: Optional[str] = None
+    error: Optional[str] = None
+    sources: List[ChunkResult] = []
+    grade: Optional[AnswerGradeResponse] = None
+    latency_ms: float = 0.0
+
+
+class BatchQueryResponse(BaseModel):
+    """Response body for POST /notebooks/{id}/batch-query."""
+    results: List[BatchQueryResult]
+    total_questions: int
+    answered: int
+    failed: int
+    total_latency_ms: float
 
 
 class HealthResponse(BaseModel):
@@ -180,6 +212,8 @@ class _AppState:
     vector_store: Optional[PgVectorStore] = None
     embedder: Optional[Embedder] = None
     source_pool: Optional[ThreadPoolExecutor] = None
+    batch_pool: Optional[ThreadPoolExecutor] = None
+    validator: Optional[AnswerValidator] = None
 
 
 _state = _AppState()
@@ -221,9 +255,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     source_service.set_embedder(embedder)
 
     podcast_db.ensure_table()
+    chunk_graph_db.ensure_table()
     chunk_db.ensure_hnsw_index()
 
+    try:
+        _state.validator = AnswerValidator()
+        logger.info("Answer validator ready")
+    except Exception as exc:
+        logger.warning("Answer validator init failed (non-fatal): %s", exc)
+        _state.validator = None
+
     _state.source_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="source")
+    _state.batch_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="batch")
 
     api_key = os.getenv("NVIDIA_API_KEY", "").strip()
     if api_key:
@@ -242,6 +285,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     logger.info("API startup complete")
     yield
 
+    if _state.batch_pool:
+        _state.batch_pool.shutdown(wait=True)
     if _state.source_pool:
         _state.source_pool.shutdown(wait=True)
     if _state.embedder:
@@ -274,16 +319,27 @@ app.add_middleware(
 # Helper — shared query logic
 # ---------------------------------------------------------------------------
 
-def _run_query(request: QueryRequest, notebook_id: Optional[str] = None) -> QueryResponse:
+def _run_query(
+    request: QueryRequest,
+    notebook_id: Optional[str] = None,
+    skip_validation: bool = False,
+) -> QueryResponse:
     """
-    Shared retrieve-and-generate logic used by both /query and scoped endpoint.
+    Shared retrieve-and-generate logic with multi-hop retrieval and answer validation.
+
+    Pipeline:
+      1. Multi-hop retrieve (vector search + graph expansion)
+      2. Generate answer with LLM
+      3. Validate answer quality (unless skip_validation is True)
+      4. Retry once if validation fails
 
     Args:
-        request:     Validated query request.
-        notebook_id: If provided, restrict retrieval to this notebook.
+        request:          Validated query request.
+        notebook_id:      If provided, restrict retrieval to this notebook.
+        skip_validation:  If True, skip the answer-validation LLM call.
 
     Returns:
-        QueryResponse with answer, references, and sources.
+        QueryResponse with answer, references, sources, and quality grade.
     """
     if _state.retriever is None:
         raise HTTPException(
@@ -291,8 +347,12 @@ def _run_query(request: QueryRequest, notebook_id: Optional[str] = None) -> Quer
             detail="Retriever not initialised — check database connection.",
         )
 
-    chunks: List[RetrievedChunk] = _state.retriever.retrieve(
-        request.question, top_k=request.top_k, notebook_id=notebook_id,
+    chunks: List[RetrievedChunk] = _state.retriever.retrieve_multihop(
+        request.question,
+        top_k=request.top_k,
+        notebook_id=notebook_id,
+        max_hops=1,
+        expansion_k=3,
     )
 
     if not chunks:
@@ -327,7 +387,22 @@ def _run_query(request: QueryRequest, notebook_id: Optional[str] = None) -> Quer
             sources=source_list,
         )
 
-    result = _state.generator.generate(question=request.question, chunks=chunks)
+    result = _state.generator.generate(
+        question=request.question,
+        chunks=chunks,
+        validator=None if skip_validation else _state.validator,
+    )
+
+    grade_resp: Optional[AnswerGradeResponse] = None
+    if result.grade is not None:
+        grade_resp = AnswerGradeResponse(
+            faithfulness=result.grade.faithfulness,
+            completeness=result.grade.completeness,
+            citation_accuracy=result.grade.citation_accuracy,
+            overall=result.grade.overall,
+            passed=result.grade.passed,
+            issues=result.grade.issues,
+        )
 
     return QueryResponse(
         question=request.question,
@@ -336,6 +411,7 @@ def _run_query(request: QueryRequest, notebook_id: Optional[str] = None) -> Quer
         chunks_used=result.chunks_used,
         latency_ms=round(result.latency_ms, 1),
         sources=source_list,
+        grade=grade_resp,
     )
 
 
@@ -478,6 +554,115 @@ async def notebook_query(notebook_id: str, request: QueryRequest) -> QueryRespon
         raise HTTPException(status_code=404, detail=str(exc))
 
     return _run_query(request, notebook_id=notebook_id)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  BATCH QUERY ENDPOINT
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.post(
+    "/notebooks/{notebook_id}/batch-query",
+    response_model=BatchQueryResponse,
+    summary="Batch Q&A from file",
+)
+async def batch_query(
+    notebook_id: str,
+    file: UploadFile = File(...),
+    top_k: int = 5,
+):
+    """
+    Upload a JSON or PDF file containing questions and receive
+    answers for each one, using this notebook's sources.
+
+    **JSON format:** an array of strings — ``["Q1?", "Q2?"]`` —
+    or ``{"questions": ["Q1?", "Q2?"]}``.
+
+    **PDF format:** lines ending with ``?`` or numbered patterns
+    like ``Q1.``, ``1)``, ``- question?``.
+    """
+    try:
+        notebook_service.get_notebook(notebook_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    if _state.retriever is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Retriever not initialised.",
+        )
+
+    raw_bytes = await file.read()
+    try:
+        questions = batch_query_service.extract_questions(
+            file.filename or "upload", raw_bytes,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    def _run_single(question: str, qk: int, nb_id: str):
+        try:
+            req = QueryRequest(question=question, top_k=qk)
+            return _run_query(req, notebook_id=nb_id, skip_validation=True)
+        except HTTPException as exc:
+            raise RuntimeError(exc.detail) from exc
+
+    loop = asyncio.get_running_loop()
+    batch_results = await loop.run_in_executor(
+        _state.batch_pool,
+        batch_query_service.run_batch,
+        questions,
+        _run_single,
+        notebook_id,
+        top_k,
+    )
+
+    results: List[BatchQueryResult] = []
+    answered = 0
+    failed = 0
+    total_lat = 0.0
+
+    for br in batch_results:
+        total_lat += br.latency_ms
+        src_list = [
+            ChunkResult(
+                citation=s.get("citation", ""),
+                section_title="",
+                page=s.get("page", 0),
+                score=s.get("score", 0.0),
+                source_name=s.get("source_name", ""),
+            )
+            for s in br.sources
+        ]
+        grade_resp = None
+        if br.grade:
+            grade_resp = AnswerGradeResponse(
+                faithfulness=br.grade.get("faithfulness", 0),
+                completeness=br.grade.get("completeness", 0),
+                citation_accuracy=br.grade.get("citation_accuracy", 0),
+                overall=br.grade.get("overall", 0),
+                passed=br.grade.get("passed", True),
+                issues=br.grade.get("issues", []),
+            )
+        if br.error:
+            failed += 1
+        else:
+            answered += 1
+        results.append(BatchQueryResult(
+            question=br.question,
+            answer=br.answer,
+            error=br.error,
+            sources=src_list,
+            grade=grade_resp,
+            latency_ms=br.latency_ms,
+        ))
+
+    return BatchQueryResponse(
+        results=results,
+        total_questions=len(questions),
+        answered=answered,
+        failed=failed,
+        total_latency_ms=round(total_lat, 1),
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
