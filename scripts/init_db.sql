@@ -4,46 +4,63 @@
 -- Enable pgvector extension
 CREATE EXTENSION IF NOT EXISTS vector;
 
--- Create table for document chunks with vector embeddings
+-- ─── Notebooks ───
+CREATE TABLE IF NOT EXISTS notebooks (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    title       TEXT NOT NULL DEFAULT 'Untitled notebook',
+    created_at  TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at  TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ─── Sources (per notebook) ───
+CREATE TABLE IF NOT EXISTS sources (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    notebook_id   UUID NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+    name          TEXT NOT NULL,
+    source_type   TEXT NOT NULL DEFAULT 'file',
+    file_path     TEXT,
+    raw_content   TEXT,
+    status        TEXT NOT NULL DEFAULT 'pending',
+    error_message TEXT,
+    chunk_count   INTEGER DEFAULT 0,
+    created_at    TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at    TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_sources_notebook ON sources(notebook_id);
+
+-- ─── Document chunks with vector embeddings ───
 CREATE TABLE IF NOT EXISTS document_chunks (
     id SERIAL PRIMARY KEY,
     chunk_id TEXT UNIQUE NOT NULL,
     text TEXT NOT NULL,
-    embedding halfvec(4096),  -- 4096 dimensions for nvidia/nv-embed-v1
-    
+    embedding halfvec(4096),
+
+    -- Foreign keys for notebook scoping
+    notebook_id UUID REFERENCES notebooks(id) ON DELETE CASCADE,
+    source_id   UUID REFERENCES sources(id) ON DELETE CASCADE,
+
     -- Metadata for citations
     section_id VARCHAR(50),
     chapter_id VARCHAR(50),
     section_title TEXT,
     page_num INTEGER,
-    
+
     -- Additional metadata
     chunk_index INTEGER,
     char_count INTEGER,
     word_count INTEGER,
-    
+
     -- Timestamps
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Create index on chunk_id for fast lookups
 CREATE INDEX IF NOT EXISTS idx_chunk_id ON document_chunks(chunk_id);
-
--- Create index on section_id for filtering
 CREATE INDEX IF NOT EXISTS idx_section_id ON document_chunks(section_id);
-
--- Create index on chapter_id for filtering
 CREATE INDEX IF NOT EXISTS idx_chapter_id ON document_chunks(chapter_id);
-
--- Create IVFFlat index for vector similarity search
--- Note: This will be created after data is inserted (needs training data)
--- CREATE INDEX IF NOT EXISTS idx_embedding_ivfflat ON document_chunks 
--- USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
-
--- Alternative: HNSW index (better performance, more memory)
--- CREATE INDEX IF NOT EXISTS idx_embedding_hnsw ON document_chunks 
--- USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_chunks_notebook ON document_chunks(notebook_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_source ON document_chunks(source_id);
 
 -- Function to update updated_at timestamp
 CREATE OR REPLACE FUNCTION update_updated_at_column()
@@ -54,8 +71,18 @@ BEGIN
 END;
 $$ language 'plpgsql';
 
--- Trigger to automatically update updated_at
-CREATE TRIGGER update_document_chunks_updated_at 
-    BEFORE UPDATE ON document_chunks 
-    FOR EACH ROW 
+-- Triggers for updated_at
+CREATE TRIGGER update_document_chunks_updated_at
+    BEFORE UPDATE ON document_chunks
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_notebooks_updated_at
+    BEFORE UPDATE ON notebooks
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_sources_updated_at
+    BEFORE UPDATE ON sources
+    FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_column();

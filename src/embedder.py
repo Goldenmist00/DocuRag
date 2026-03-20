@@ -12,7 +12,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 from enum import Enum
 
 import numpy as np
@@ -84,12 +84,12 @@ class Embedder:
             "Content-Type": "application/json",
         }
 
-        # Thread lock to prevent concurrent cache read/write corruption
         self._cache_lock = threading.Lock()
+        self._mem_cache: Dict[str, np.ndarray] = {}
+        self._cache_dirty = False
+        self._load_cache_into_memory()
 
-        # Stub — no local model to load
         self._model_loaded = True
-
         logger.info("Embedder ready | model=%s | dim=%d | API-based", _NVIDIA_MODEL, _NVIDIA_DIM)
 
     # ------------------------------------------------------------------
@@ -153,27 +153,35 @@ class Embedder:
         return _call(safe_texts)
 
     # ------------------------------------------------------------------
-    # Cache helpers
+    # In-memory cache with lazy disk persistence
     # ------------------------------------------------------------------
 
     @staticmethod
     def _hash(text: str) -> str:
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-    def _load_cache_store(self) -> Dict[str, np.ndarray]:
+    def _load_cache_into_memory(self) -> None:
+        """Load the on-disk .npz cache into ``_mem_cache`` once at init."""
         p = self.cache_dir / _CACHE_FILE
         if p.exists():
             try:
-                return dict(np.load(p, allow_pickle=False))
+                data = np.load(p, allow_pickle=False)
+                self._mem_cache = dict(data)
+                logger.info("Loaded %d cached embeddings from disk", len(self._mem_cache))
             except Exception as e:
                 logger.warning("Cache load failed, starting fresh: %s", e)
-        return {}
 
-    def _save_cache_store(self, store: Dict[str, np.ndarray]) -> None:
-        try:
-            np.savez(self.cache_dir / _CACHE_FILE, **store)
-        except Exception as e:
-            logger.warning("Cache save failed: %s", e)
+    def flush_cache(self) -> None:
+        """Persist dirty in-memory cache to disk. Called on shutdown."""
+        if not self._cache_dirty:
+            return
+        with self._cache_lock:
+            try:
+                np.savez(self.cache_dir / _CACHE_FILE, **self._mem_cache)
+                self._cache_dirty = False
+                logger.info("Flushed %d embeddings to disk cache", len(self._mem_cache))
+            except Exception as e:
+                logger.warning("Cache flush failed: %s", e)
 
     # ------------------------------------------------------------------
     # Public API
@@ -189,38 +197,53 @@ class Embedder:
         batch_size: int = _NVIDIA_BATCH_SIZE,
         show_progress: bool = True,
         use_cache: bool = True,
+        on_batch_done: Optional[Callable[[int, int], None]] = None,
     ) -> np.ndarray:
-        """Embed a list of strings. Caches results in a single npz file."""
+        """
+        Embed a list of strings using in-memory cache and parallel API calls.
+
+        Args:
+            texts:         Strings to embed.
+            batch_size:    Ignored (uses _NVIDIA_BATCH_SIZE).
+            show_progress: Show tqdm bar.
+            use_cache:     Whether to use the in-memory embedding cache.
+            on_batch_done: Optional callback ``(batch_idx, total_batches)``
+                           invoked after each API batch completes.
+
+        Returns:
+            (N, 4096) float32 array.
+        """
         if not texts:
             return np.array([])
 
-        with self._cache_lock:
-            store = self._load_cache_store() if use_cache else {}
         results: List[Optional[np.ndarray]] = []
         to_compute: List[str] = []
         to_compute_idx: List[int] = []
         hits = 0
 
-        for i, text in enumerate(texts):
-            h = self._hash(text)
-            if use_cache and h in store:
-                results.append(store[h])
-                hits += 1
-            else:
-                results.append(None)
-                to_compute.append(text)
-                to_compute_idx.append(i)
-        self._stats_cache_hits   = hits
+        with self._cache_lock:
+            for i, text in enumerate(texts):
+                h = self._hash(text)
+                cached = self._mem_cache.get(h) if use_cache else None
+                if cached is not None:
+                    results.append(cached)
+                    hits += 1
+                else:
+                    results.append(None)
+                    to_compute.append(text)
+                    to_compute_idx.append(i)
+
+        self._stats_cache_hits = hits
         self._stats_cache_misses = len(to_compute)
 
         if to_compute:
-            # Build list of batches
             batches = [
                 to_compute[i: i + _NVIDIA_BATCH_SIZE]
                 for i in range(0, len(to_compute), _NVIDIA_BATCH_SIZE)
             ]
             n_batches = len(batches)
             computed_map: Dict[int, np.ndarray] = {}
+            done_count = 0
 
             pbar = tqdm(total=n_batches, desc="Embedding (NVIDIA API)", unit="batch") if show_progress else None
 
@@ -232,24 +255,23 @@ class Embedder:
                 for future in as_completed(future_to_idx):
                     batch_idx = future_to_idx[future]
                     computed_map[batch_idx] = future.result()
+                    done_count += 1
                     if pbar:
                         pbar.update(1)
+                    if on_batch_done:
+                        on_batch_done(done_count, n_batches)
 
             if pbar:
                 pbar.close()
 
-            # Reassemble in original order
-            computed = [computed_map[i] for i in range(n_batches)]
+            computed_arr = np.vstack([computed_map[i] for i in range(n_batches)])
 
-            computed_arr = np.vstack(computed)
-            for idx, emb in zip(to_compute_idx, computed_arr):
-                results[idx] = emb
-                if use_cache:
-                    store[self._hash(texts[idx])] = emb
-
-            if use_cache:
-                with self._cache_lock:
-                    self._save_cache_store(store)
+            with self._cache_lock:
+                for idx, emb in zip(to_compute_idx, computed_arr):
+                    results[idx] = emb
+                    if use_cache:
+                        self._mem_cache[self._hash(texts[idx])] = emb
+                        self._cache_dirty = True
 
         return np.vstack(results)
 

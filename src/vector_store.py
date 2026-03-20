@@ -414,6 +414,7 @@ class PgVectorStore:
         query_embedding: np.ndarray,
         top_k: int = 10,
         probes: int = 10,
+        notebook_id: Optional[str] = None,
     ) -> List[Dict]:
         """
         Retrieve the ``top_k`` most similar chunks via cosine similarity.
@@ -423,6 +424,7 @@ class PgVectorStore:
             top_k:           Number of results to return.
             probes:          IVFFlat search probes (higher = more accurate,
                              slower).  Ignored when using HNSW.
+            notebook_id:     If provided, restrict to this notebook's chunks.
 
         Returns:
             List of result dicts, each containing::
@@ -439,6 +441,12 @@ class PgVectorStore:
         vec = query_embedding.tolist()
         needs_halfvec = self.embedding_dim > 2000
 
+        where_clause = ""
+        extra_params: list = []
+        if notebook_id:
+            where_clause = "WHERE notebook_id = %s"
+            extra_params = [notebook_id]
+
         try:
             with self._connection() as conn:
                 with conn.cursor() as cur:
@@ -451,10 +459,11 @@ class PgVectorStore:
                                 char_count, word_count,
                                 1 - (embedding <=> %s::halfvec({self.embedding_dim})) AS score
                             FROM {self.table_name}
+                            {where_clause}
                             ORDER BY embedding <=> %s::halfvec({self.embedding_dim})
                             LIMIT %s
                             """,
-                            (vec, vec, top_k),
+                            (vec, *extra_params, vec, top_k),
                         )
                     else:
                         cur.execute(f"SET ivfflat.probes = {probes}")
@@ -466,10 +475,11 @@ class PgVectorStore:
                                 char_count, word_count,
                                 1 - (embedding <=> %s::vector) AS score
                             FROM {self.table_name}
+                            {where_clause}
                             ORDER BY embedding <=> %s::vector
                             LIMIT %s
                             """,
-                            (vec, vec, top_k),
+                            (vec, *extra_params, vec, top_k),
                         )
 
                     results = [
