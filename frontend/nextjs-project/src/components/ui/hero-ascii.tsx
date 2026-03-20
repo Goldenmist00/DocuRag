@@ -113,15 +113,15 @@ export default function HeroAscii() {
               <Sparkles size={16} className="opacity-50" />
               Features
             </Link>
-            <Link href="#search" className="flex items-center gap-2.5 px-5 py-2.5 rounded-md text-sm tracking-[0.12em] uppercase text-white/40 hover:text-white/80 hover:bg-white/[0.04] transition-all duration-200">
+            <Link href="#features" className="flex items-center gap-2.5 px-5 py-2.5 rounded-md text-sm tracking-[0.12em] uppercase text-white/40 hover:text-white/80 hover:bg-white/[0.04] transition-all duration-200">
               <Search size={16} className="opacity-50" />
               Search
             </Link>
-            <Link href="#docs" className="flex items-center gap-2.5 px-5 py-2.5 rounded-md text-sm tracking-[0.12em] uppercase text-white/40 hover:text-white/80 hover:bg-white/[0.04] transition-all duration-200">
+            <Link href="#cta" className="flex items-center gap-2.5 px-5 py-2.5 rounded-md text-sm tracking-[0.12em] uppercase text-white/40 hover:text-white/80 hover:bg-white/[0.04] transition-all duration-200">
               <BookOpen size={16} className="opacity-50" />
-              Docs
+              Get Started
             </Link>
-            <Link href="#citations" className="flex items-center gap-2.5 px-5 py-2.5 rounded-md text-sm tracking-[0.12em] uppercase text-white/40 hover:text-white/80 hover:bg-white/[0.04] transition-all duration-200">
+            <Link href="#features" className="flex items-center gap-2.5 px-5 py-2.5 rounded-md text-sm tracking-[0.12em] uppercase text-white/40 hover:text-white/80 hover:bg-white/[0.04] transition-all duration-200">
               <ShieldCheck size={16} className="opacity-50" />
               Citations
             </Link>
@@ -161,8 +161,8 @@ export default function HeroAscii() {
 
             {/* Thin accent line below title */}
             <div className="mt-5 sm:mt-6 mb-5 sm:mb-6 flex items-center gap-3 opacity-25">
-              <div className="h-px flex-1 max-w-[180px] bg-gradient-to-r from-[#7352DD]/60 via-[#A78BFA]/40 to-transparent" />
-              <div className="w-1 h-1 rounded-full bg-[#A78BFA]/50" />
+              <div className="h-px flex-1 max-w-[180px] bg-gradient-to-r from-white/40 via-white/20 to-transparent" />
+              <div className="w-1 h-1 rounded-full bg-white/30" />
             </div>
 
             {/* Description */}
@@ -174,7 +174,7 @@ export default function HeroAscii() {
             <div className="flex flex-col sm:flex-row gap-5" style={{ marginTop: '80px' }}>
               <Link
                 href="/signup"
-                className="group relative inline-flex items-center justify-center gap-3 px-14 py-5 bg-white text-[#060609] text-base tracking-[0.12em] font-bold uppercase rounded-md transition-all duration-300 hover:bg-[#A78BFA] hover:text-white hover:shadow-[0_0_40px_rgba(167,139,250,0.3)] hover:scale-[1.02]"
+                className="group relative inline-flex items-center justify-center gap-3 px-14 py-5 bg-white text-[#060609] text-base tracking-[0.12em] font-bold uppercase rounded-md transition-all duration-300 hover:bg-white/90 hover:shadow-[0_0_40px_rgba(255,255,255,0.15)] hover:scale-[1.02]"
                 style={{ fontFamily: 'var(--font-hero-mono)' }}
               >
                 Get Started
@@ -218,9 +218,9 @@ export default function HeroAscii() {
           <div className="flex items-center gap-2.5 lg:gap-4 text-[7px] sm:text-[8px] lg:text-[9px] text-white/25 tracking-[0.15em]" style={{ fontFamily: 'var(--font-hero-mono)' }}>
             <span className="hidden md:inline">RENDERING</span>
             <div className="flex gap-1">
-              <div className="w-1 h-1 bg-[#A78BFA]/50 rounded-full animate-pulse" />
-              <div className="w-1 h-1 bg-[#A78BFA]/30 rounded-full animate-pulse" style={{ animationDelay: '0.2s' }} />
-              <div className="w-1 h-1 bg-[#A78BFA]/15 rounded-full animate-pulse" style={{ animationDelay: '0.4s' }} />
+              <div className="w-1 h-1 bg-white/40 rounded-full animate-pulse" />
+              <div className="w-1 h-1 bg-white/25 rounded-full animate-pulse" style={{ animationDelay: '0.2s' }} />
+              <div className="w-1 h-1 bg-white/12 rounded-full animate-pulse" style={{ animationDelay: '0.4s' }} />
             </div>
             <span className="hidden md:inline">FRAME: ∞</span>
           </div>
@@ -230,13 +230,13 @@ export default function HeroAscii() {
       <style jsx>{`
         .stars-bg {
           background-image:
-            radial-gradient(1px 1px at 20% 30%, rgba(167,139,250,0.4), transparent),
+            radial-gradient(1px 1px at 20% 30%, rgba(255,255,255,0.5), transparent),
             radial-gradient(1px 1px at 60% 70%, white, transparent),
-            radial-gradient(1px 1px at 50% 50%, rgba(167,139,250,0.3), transparent),
+            radial-gradient(1px 1px at 50% 50%, rgba(255,255,255,0.4), transparent),
             radial-gradient(1px 1px at 80% 10%, white, transparent),
-            radial-gradient(1px 1px at 90% 60%, rgba(167,139,250,0.3), transparent),
+            radial-gradient(1px 1px at 90% 60%, rgba(255,255,255,0.35), transparent),
             radial-gradient(1px 1px at 33% 80%, white, transparent),
-            radial-gradient(1px 1px at 15% 60%, rgba(167,139,250,0.2), transparent),
+            radial-gradient(1px 1px at 15% 60%, rgba(255,255,255,0.3), transparent),
             radial-gradient(1px 1px at 70% 40%, white, transparent);
           background-size: 200% 200%, 180% 180%, 250% 250%, 220% 220%, 190% 190%, 240% 240%, 210% 210%, 230% 230%;
           background-position: 0% 0%, 40% 40%, 60% 60%, 20% 20%, 80% 80%, 30% 30%, 70% 70%, 50% 50%;

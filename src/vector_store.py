@@ -13,7 +13,7 @@ Responsibilities:
 Usage:
     from src.vector_store import PgVectorStore
 
-    vs = PgVectorStore(embedding_dim=768)
+    vs = PgVectorStore(embedding_dim=4096)
     vs.insert_chunks(chunks, embeddings)
     vs.create_index()
     results = vs.search(query_embedding, top_k=5)
@@ -67,8 +67,7 @@ class PgVectorStore:
         Initialise the vector store and verify the database connection.
 
         Args:
-            embedding_dim:    Dimensionality of the embedding vectors.
-                              Must match the model used (384 / 768 / 1024).
+            embedding_dim:    Dimensionality of the embedding vectors (4096 for nv-embed-v1).
             host:             PostgreSQL host.
             port:             PostgreSQL port.
             database:         Database name.

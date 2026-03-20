@@ -183,9 +183,6 @@ class Embedder:
         """Embed a single string (e.g. a query)."""
         return self.embed_batch([text], show_progress=False, use_cache=use_cache)[0]
 
-    def embed_text(self, text: str, use_cache: bool = True) -> np.ndarray:
-        return self.embed(text, use_cache=use_cache)
-
     def embed_batch(
         self,
         texts: List[str],
@@ -296,9 +293,7 @@ class Embedder:
     def embedding_dim(self) -> int:
         return _NVIDIA_DIM
 
-    def get_embedding_dimension(self) -> int:
-        return _NVIDIA_DIM
-
-
-def create_embedder(tier: str = "nvidia", **kwargs) -> Embedder:
-    return Embedder(**kwargs)
+    @property
+    def device(self) -> str:
+        """Compatibility property — embedder is API-based."""
+        return "api"
