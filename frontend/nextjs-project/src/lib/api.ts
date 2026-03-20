@@ -308,6 +308,77 @@ export interface QuizQuestion {
   answer: number;
 }
 
+// ─── Podcast ───
+
+export interface PodcastRecord {
+  id: string;
+  notebook_id: string;
+  status: string;
+  transcript: string | null;
+  audio_path: string | null;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Trigger podcast generation for a notebook.
+ * @param notebookId - Parent notebook UUID
+ * @returns Created podcast record (status will be "pending")
+ */
+export async function generatePodcast(
+  notebookId: string
+): Promise<PodcastRecord> {
+  const res = await fetch(
+    `${API_BASE}/notebooks/${notebookId}/podcast`,
+    { method: "POST" }
+  );
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(`Podcast generation failed: ${detail}`);
+  }
+  return res.json();
+}
+
+/**
+ * Get the current podcast status for a notebook.
+ * @param notebookId - Parent notebook UUID
+ * @returns Podcast record or null if none exists
+ */
+export async function getPodcast(
+  notebookId: string
+): Promise<PodcastRecord | null> {
+  const res = await fetch(
+    `${API_BASE}/notebooks/${notebookId}/podcast`
+  );
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`Get podcast failed: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Get the audio URL for a notebook's podcast.
+ * @param notebookId - Parent notebook UUID
+ * @returns Full URL to the podcast MP3 audio
+ */
+export function getPodcastAudioUrl(notebookId: string): string {
+  return `${API_BASE}/notebooks/${notebookId}/podcast/audio`;
+}
+
+/**
+ * Delete the podcast for a notebook.
+ * @param notebookId - Parent notebook UUID
+ */
+export async function deletePodcast(notebookId: string): Promise<void> {
+  const res = await fetch(
+    `${API_BASE}/notebooks/${notebookId}/podcast`,
+    { method: "DELETE" }
+  );
+  if (!res.ok) throw new Error(`Delete podcast failed: ${res.status}`);
+}
+
+// ─── Studio: Quiz ───
+
 export async function generateQuiz(
   text: string,
   count = 10,

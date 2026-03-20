@@ -10,7 +10,7 @@ chunking:
   chunk_overlap: 100     # 100-char overlap preserves cross-boundary context
   min_chunk_size: 150    # discard captions / stray headers shorter than this
 
-# Embedding — NVIDIA API (nv-embed-v1, 4096d)
+# Embedding — NVIDIA API (baai/bge-m3, 1024d)
 embedding:
   tier: "nvidia"
 
