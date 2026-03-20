@@ -10,8 +10,15 @@ import {
   addTextSource,
   deleteSource as deleteSourceApi,
   updateNotebookTitle,
+  generateFlashcards,
+  generateSummary,
+  generateMindMap,
+  generateQuiz,
   type SourceRecord,
   type Source as ChunkSource,
+  type Flashcard,
+  type MindMapData,
+  type QuizQuestion,
 } from "@/lib/api";
 import { useToast } from "@/components/ui/toast";
 
@@ -714,9 +721,11 @@ function ToolGrid({
 
 /* ─── Mind Map ─── */
 /* ─── Mind Map ─── */
-function MindMap({ fullscreen }: { fullscreen?: boolean }) {
+function MindMap({ fullscreen, data }: { fullscreen?: boolean; data?: { root: string; branches: { label: string; children: string[] }[] } }) {
   const [expandedBranch, setExpandedBranch] = useState<number | null>(null);
   const [zoom, setZoom] = useState(1);
+
+  const mapData = data || MINDMAP;
 
   const handleWheel = (e: React.WheelEvent) => {
     e.preventDefault();
@@ -736,14 +745,14 @@ function MindMap({ fullscreen }: { fullscreen?: boolean }) {
   const CHILD_W = 120 * scale;
   const CHILD_H = 30 * scale;
 
-  const branchCount = MINDMAP.branches.length;
+  const branchCount = mapData.branches.length;
   const branchSpacing = 60 * scale;
   const totalBranchHeight = (branchCount - 1) * branchSpacing;
   const branchStartY = ROOT_Y - totalBranchHeight / 2;
 
   let svgHeight = Math.max(440, branchCount * branchSpacing + 140);
   if (expandedBranch !== null) {
-    const childCount = MINDMAP.branches[expandedBranch].children.length;
+    const childCount = mapData.branches[expandedBranch].children.length;
     svgHeight = Math.max(svgHeight, branchCount * branchSpacing + childCount * 40 * scale + 180);
   }
 
@@ -796,12 +805,12 @@ function MindMap({ fullscreen }: { fullscreen?: boolean }) {
               fontWeight="600"
               fontFamily="inherit"
             >
-              {MINDMAP.root}
+              {mapData.root}
             </text>
           </g>
 
           {/* ── Branches ── */}
-          {MINDMAP.branches.map((branch, bi) => {
+          {mapData.branches.map((branch, bi) => {
             const by = branchStartY + bi * branchSpacing;
             const isExpanded = expandedBranch === bi;
             const childCount = branch.children.length;
@@ -910,12 +919,13 @@ function MindMap({ fullscreen }: { fullscreen?: boolean }) {
 }
 
 /* ─── Studio sidebar ─── */
-function StudioSidebar({ isNew, view, onViewChange, fullscreen, onFullscreenChange }: {
+function StudioSidebar({ isNew, view, onViewChange, fullscreen, onFullscreenChange, notebookId }: {
   isNew: boolean;
   view: StudioView;
   onViewChange: (v: StudioView) => void;
   fullscreen: boolean;
   onFullscreenChange: (v: boolean) => void;
+  notebookId: string | null;
 }) {
   const [cardIdx, setCardIdx] = useState(0);
   const [cardAnswerShown, setCardAnswerShown] = useState(false);
@@ -924,20 +934,73 @@ function StudioSidebar({ isNew, view, onViewChange, fullscreen, onFullscreenChan
   const [generating, setGenerating] = useState<StudioView | null>(null);
   const [generatedResults, setGeneratedResults] = useState<Set<StudioView>>(new Set());
   const [tappedResult, setTappedResult] = useState<StudioView | null>(null);
+  const [generateError, setGenerateError] = useState<string | null>(null);
+
+  // Real generated data
+  const [realFlashcards, setRealFlashcards] = useState<Flashcard[]>([]);
+  const [realSummary, setRealSummary] = useState<string>("");
+  const [realMindMap, setRealMindMap] = useState<MindMapData | null>(null);
+  const [realQuiz, setRealQuiz] = useState<QuizQuestion[]>([]);
 
   const setView = onViewChange;
   const setFullscreen = onFullscreenChange;
   const [fsClosing, setFsClosing] = useState(false);
 
-  // Handle tool card click — simulate generation then show preview
-  const handleToolSelect = (v: StudioView) => {
+  // Handle tool card click — call real API
+  const handleToolSelect = async (v: StudioView) => {
     if (generating) return;
     setGenerating(v);
-    const delay = v === "mindmap" ? 2000 : v === "quiz" ? 2200 : 1600;
-    setTimeout(() => {
-      setGenerating(null);
+    setGenerateError(null);
+
+    try {
+      // Fetch source text via the notebook query endpoint to get context
+      // We use a broad question to retrieve the most content
+      const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const queryRes = await fetch(
+        notebookId ? `${API_BASE}/notebooks/${notebookId}/query` : `${API_BASE}/query`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question: "summarize all key concepts topics and information", top_k: 20 }),
+        }
+      );
+
+      let sourceText = "";
+      if (queryRes.ok) {
+        const qData = await queryRes.json();
+        // Use the answer + question as context, or fall back to a placeholder
+        sourceText = qData.answer || "";
+        // Also append source chunk info if available
+        if (qData.sources && qData.sources.length > 0) {
+          sourceText = qData.sources.map((s: { citation: string }) => s.citation).join("\n") + "\n\n" + sourceText;
+        }
+      }
+
+      if (!sourceText || sourceText.length < 20) {
+        throw new Error("Not enough source content. Add sources to your notebook first.");
+      }
+
+      if (v === "flashcards") {
+        const cards = await generateFlashcards(sourceText, 10);
+        setRealFlashcards(cards);
+      } else if (v === "summary") {
+        const result = await generateSummary(sourceText, "medium");
+        setRealSummary(result.summary);
+      } else if (v === "mindmap") {
+        const map = await generateMindMap(sourceText);
+        setRealMindMap(map);
+      } else if (v === "quiz") {
+        const questions = await generateQuiz(sourceText, quizCount, quizDifficulty);
+        setRealQuiz(questions);
+      }
+
       setGeneratedResults(prev => new Set(prev).add(v));
-    }, delay);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setGenerateError(msg);
+    } finally {
+      setGenerating(null);
+    }
   };
   const closeFullscreen = () => {
     setFsClosing(true);
@@ -956,16 +1019,17 @@ function StudioSidebar({ isNew, view, onViewChange, fullscreen, onFullscreenChan
   const [quizCountPreset, setQuizCountPreset] = useState<10 | 20 | 30 | "custom">(10);
   const [quizCustomInput, setQuizCustomInput] = useState("10");
 
-  const card = CARDS[cardIdx];
-  const front = card.q;
-  const back  = card.a;
+  const card = realFlashcards.length > 0 ? realFlashcards[cardIdx] : CARDS[cardIdx];
+  const front = card.question;
+  const back  = card.answer;
 
-  const quizQ = QUIZ[quizIdx];
+  const activeQuiz = realQuiz.length > 0 ? realQuiz : QUIZ;
+  const quizQ = activeQuiz[quizIdx];
   const quizCorrect = quizSelected === quizQ?.answer;
 
   const handleQuizNext = () => {
     const newScore = quizScore + (quizCorrect ? 1 : 0);
-    if (quizIdx + 1 >= QUIZ.length) {
+    if (quizIdx + 1 >= activeQuiz.length) {
       setQuizScore(newScore);
       setQuizDone(true);
     } else {
@@ -1039,6 +1103,13 @@ function StudioSidebar({ isNew, view, onViewChange, fullscreen, onFullscreenChan
 
             {/* Tool grid */}
             <ToolGrid tools={TOOLS} onSelect={handleToolSelect} generating={generating} />
+
+            {/* Error message */}
+            {generateError && (
+              <div style={{ marginTop: 12, padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(239,68,68,0.3)", background: "rgba(239,68,68,0.06)", fontSize: "0.75rem", color: "rgba(252,165,165,0.9)", lineHeight: 1.5 }}>
+                {generateError}
+              </div>
+            )}
 
             {/* ── Generated result previews ── */}
             {(generatedResults.size > 0 || generating) && (
@@ -1182,13 +1253,14 @@ function StudioSidebar({ isNew, view, onViewChange, fullscreen, onFullscreenChan
                 {/* Title */}
                 <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between" }}>
                   <div>
-                    <p style={{ fontSize: fullscreen ? "1.6rem" : "1.15rem", fontWeight: 700, color: "rgba(255,255,255,0.88)", margin: "0 0 2px" }}>Biology Flashcards</p>
-                    <p style={{ fontSize: fullscreen ? "0.9rem" : "0.78rem", color: "rgba(255,255,255,0.3)", margin: 0 }}>Based on {3} sources</p>
+                    <p style={{ fontSize: fullscreen ? "1.6rem" : "1.15rem", fontWeight: 700, color: "rgba(255,255,255,0.88)", margin: "0 0 2px" }}>Flashcards</p>
+                    <p style={{ fontSize: fullscreen ? "0.9rem" : "0.78rem", color: "rgba(255,255,255,0.3)", margin: 0 }}>{(realFlashcards.length > 0 ? realFlashcards : CARDS).length} cards</p>
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
                     <button
                       onClick={() => {
-                        const lines = CARDS.map((c, i) => `Q${i+1}: ${c.q}\nA: ${c.a}`).join("\n\n");
+                        const activeCards = realFlashcards.length > 0 ? realFlashcards : CARDS;
+                        const lines = activeCards.map((c, i) => `Q${i+1}: ${c.question}\nA: ${c.answer}`).join("\n\n");
                         const blob = new Blob([lines], { type: "text/plain" });
                         const url = URL.createObjectURL(blob);
                         const a = document.createElement("a"); a.href = url; a.download = "flashcards.txt"; a.click(); URL.revokeObjectURL(url);
@@ -1221,7 +1293,7 @@ function StudioSidebar({ isNew, view, onViewChange, fullscreen, onFullscreenChan
                   position: "relative",
                 }}>
                   {/* Counter */}
-                  <span style={{ fontSize: fullscreen ? "0.9rem" : "0.78rem", color: "rgba(255,255,255,0.25)" }}>{cardIdx + 1} / {CARDS.length}</span>
+                  <span style={{ fontSize: fullscreen ? "0.9rem" : "0.78rem", color: "rgba(255,255,255,0.25)" }}>{cardIdx + 1} / {(realFlashcards.length > 0 ? realFlashcards : CARDS).length}</span>
 
                   {/* Question */}
                   <p style={{ fontSize: fullscreen ? "1.65rem" : "1.25rem", fontWeight: 600, color: "rgba(255,255,255,0.9)", lineHeight: 1.6, margin: 0, flex: 1 }}>
@@ -1279,7 +1351,7 @@ function StudioSidebar({ isNew, view, onViewChange, fullscreen, onFullscreenChan
 
                   {/* Wrong counter */}
                   <button
-                    onClick={() => { if (cardAnswerShown) { setCardWrong(w => w + 1); setCardIdx(i => Math.min(CARDS.length - 1, i + 1)); setCardAnswerShown(false); } }}
+                    onClick={() => { if (cardAnswerShown) { setCardWrong(w => w + 1); setCardIdx(i => Math.min((realFlashcards.length > 0 ? realFlashcards : CARDS).length - 1, i + 1)); setCardAnswerShown(false); } }}
                     style={{ flex: 1, height: fullscreen ? 56 : 44, borderRadius: 28, border: "1px solid rgba(255,255,255,0.1)", background: "rgba(255,255,255,0.04)", cursor: cardAnswerShown ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, opacity: cardAnswerShown ? 1 : 0.4, transition: "opacity 0.15s, background 0.15s" }}
                   >
                     <svg width={fullscreen ? 18 : 14} height={fullscreen ? 18 : 14} viewBox="0 0 24 24" fill="none"><path d="M9 21H3m0 0v-6m0 6l7-7M15 3h6m0 0v6m0-6l-7 7" stroke="#F87171" strokeWidth="2.5" strokeLinecap="round" /></svg>
@@ -1288,7 +1360,7 @@ function StudioSidebar({ isNew, view, onViewChange, fullscreen, onFullscreenChan
 
                   {/* Right counter */}
                   <button
-                    onClick={() => { if (cardAnswerShown) { setCardRight(r => r + 1); setCardIdx(i => Math.min(CARDS.length - 1, i + 1)); setCardAnswerShown(false); } }}
+                    onClick={() => { if (cardAnswerShown) { setCardRight(r => r + 1); setCardIdx(i => Math.min((realFlashcards.length > 0 ? realFlashcards : CARDS).length - 1, i + 1)); setCardAnswerShown(false); } }}
                     style={{ flex: 1, height: fullscreen ? 56 : 44, borderRadius: 28, border: "1px solid rgba(255,255,255,0.1)", background: "rgba(255,255,255,0.04)", cursor: cardAnswerShown ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, opacity: cardAnswerShown ? 1 : 0.4, transition: "opacity 0.15s, background 0.15s" }}
                   >
                     <span style={{ fontSize: fullscreen ? "1rem" : "0.82rem", fontWeight: 600, color: "#4ADE80" }}>{cardRight}</span>
@@ -1297,9 +1369,9 @@ function StudioSidebar({ isNew, view, onViewChange, fullscreen, onFullscreenChan
 
                   {/* Forward */}
                   <button
-                    onClick={() => { setCardIdx(i => Math.min(CARDS.length - 1, i + 1)); setCardAnswerShown(false); }}
-                    disabled={cardIdx === CARDS.length - 1}
-                    style={{ width: fullscreen ? 56 : 44, height: fullscreen ? 56 : 44, borderRadius: "50%", border: "1px solid rgba(255,255,255,0.1)", background: "rgba(255,255,255,0.04)", cursor: cardIdx === CARDS.length - 1 ? "not-allowed" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", opacity: cardIdx === CARDS.length - 1 ? 0.3 : 1, transition: "opacity 0.15s" }}
+                    onClick={() => { setCardIdx(i => Math.min((realFlashcards.length > 0 ? realFlashcards : CARDS).length - 1, i + 1)); setCardAnswerShown(false); }}
+                    disabled={cardIdx === (realFlashcards.length > 0 ? realFlashcards : CARDS).length - 1}
+                    style={{ width: fullscreen ? 56 : 44, height: fullscreen ? 56 : 44, borderRadius: "50%", border: "1px solid rgba(255,255,255,0.1)", background: "rgba(255,255,255,0.04)", cursor: cardIdx === (realFlashcards.length > 0 ? realFlashcards : CARDS).length - 1 ? "not-allowed" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", opacity: cardIdx === (realFlashcards.length > 0 ? realFlashcards : CARDS).length - 1 ? 0.3 : 1, transition: "opacity 0.15s" }}
                   >
                     <svg width={fullscreen ? 20 : 16} height={fullscreen ? 20 : 16} viewBox="0 0 24 24" fill="none"><path d="M5 12h14M13 5l7 7-7 7" stroke="#6B9FFF" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" /></svg>
                   </button>
@@ -1341,7 +1413,7 @@ function StudioSidebar({ isNew, view, onViewChange, fullscreen, onFullscreenChan
                   }
                 </button>
               </div>
-              <MindMap fullscreen={fullscreen} />
+              <MindMap fullscreen={fullscreen} data={realMindMap || undefined} />
             </div>
           )
         )}
@@ -1365,8 +1437,8 @@ function StudioSidebar({ isNew, view, onViewChange, fullscreen, onFullscreenChan
                 No sources available to summarise.
               </p>
             ) : (
-              <p style={{ fontSize: "0.8rem", color: "rgba(255,255,255,0.65)", lineHeight: 1.75, margin: 0 }}>
-                Cells are the basic units of life. Mitochondria produce ATP via oxidative phosphorylation. The nucleus controls gene expression. Ribosomes synthesise proteins from mRNA templates.
+              <p style={{ fontSize: "0.8rem", color: "rgba(255,255,255,0.65)", lineHeight: 1.75, margin: 0, whiteSpace: "pre-wrap" }}>
+                {realSummary || "Click the Summary button on the home screen to generate a summary from your sources."}
               </p>
             )}
           </div>
@@ -1390,7 +1462,7 @@ function StudioSidebar({ isNew, view, onViewChange, fullscreen, onFullscreenChan
                 {/* Header */}
                 <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between" }}>
                   <div>
-                    <p style={{ fontSize: fullscreen ? "1.9rem" : "1.3rem", fontWeight: 700, color: "rgba(255,255,255,0.92)", margin: "0 0 4px" }}>Biology Quiz</p>
+                    <p style={{ fontSize: fullscreen ? "1.9rem" : "1.3rem", fontWeight: 700, color: "rgba(255,255,255,0.92)", margin: "0 0 4px" }}>Quiz</p>
                     <p style={{ fontSize: fullscreen ? "0.9rem" : "0.75rem", color: "rgba(255,255,255,0.3)", margin: 0 }}>Customise your quiz before starting</p>
                   </div>
                   <button onClick={toggleFullscreen} title={fullscreen ? "Exit fullscreen" : "Fullscreen"} style={{ background: "none", border: "none", cursor: "pointer", padding: 4, color: fullscreen ? "rgba(255,255,255,0.6)" : "rgba(255,255,255,0.25)", transition: "color 0.15s", display: "flex", alignItems: "center", marginTop: 2 }} className="action-btn">
@@ -1535,15 +1607,15 @@ function StudioSidebar({ isNew, view, onViewChange, fullscreen, onFullscreenChan
                 <div>
                   <p style={{ fontSize: fullscreen ? "2rem" : "1.3rem", fontWeight: 700, color: "white", margin: "0 0 8px" }}>Quiz Complete</p>
                   <p style={{ fontSize: fullscreen ? "1.05rem" : "0.88rem", color: "rgba(255,255,255,0.4)", margin: 0 }}>
-                    You scored <span style={{ color: "rgba(255,255,255,0.9)", fontWeight: 700 }}>{quizScore}</span> out of <span style={{ color: "rgba(255,255,255,0.9)", fontWeight: 700 }}>{QUIZ.length}</span>
+                    You scored <span style={{ color: "rgba(255,255,255,0.9)", fontWeight: 700 }}>{quizScore}</span> out of <span style={{ color: "rgba(255,255,255,0.9)", fontWeight: 700 }}>{activeQuiz.length}</span>
                   </p>
                 </div>
                 {/* Score bar */}
                 <div style={{ width: "100%", maxWidth: fullscreen ? 400 : 280 }}>
                   <div style={{ height: fullscreen ? 10 : 6, borderRadius: 5, background: "rgba(255,255,255,0.07)", overflow: "hidden" }}>
-                    <div style={{ height: "100%", width: `${(quizScore / QUIZ.length) * 100}%`, background: "rgba(255,255,255,0.5)", borderRadius: 5, transition: "width 0.6s ease" }} />
+                    <div style={{ height: "100%", width: `${(quizScore / activeQuiz.length) * 100}%`, background: "rgba(255,255,255,0.5)", borderRadius: 5, transition: "width 0.6s ease" }} />
                   </div>
-                  <p style={{ fontSize: fullscreen ? "0.85rem" : "0.68rem", color: "rgba(255,255,255,0.25)", marginTop: 8, textAlign: "center" }}>{Math.round((quizScore / QUIZ.length) * 100)}% correct</p>
+                  <p style={{ fontSize: fullscreen ? "0.85rem" : "0.68rem", color: "rgba(255,255,255,0.25)", marginTop: 8, textAlign: "center" }}>{Math.round((quizScore / activeQuiz.length) * 100)}% correct</p>
                 </div>
                 <button
                   onClick={resetQuiz}
@@ -1560,7 +1632,7 @@ function StudioSidebar({ isNew, view, onViewChange, fullscreen, onFullscreenChan
                 <div style={{ padding: "4px 0 20px", borderBottom: "1px solid rgba(255,255,255,0.06)", marginBottom: 20 }}>
                   <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between" }}>
                     <div>
-                      <p style={{ fontSize: fullscreen ? "1.7rem" : "1.3rem", fontWeight: 700, color: "rgba(255,255,255,0.92)", margin: "0 0 4px" }}>Biology Quiz</p>
+                      <p style={{ fontSize: fullscreen ? "1.7rem" : "1.3rem", fontWeight: 700, color: "rgba(255,255,255,0.92)", margin: "0 0 4px" }}>Quiz</p>
                       <p style={{ fontSize: fullscreen ? "0.9rem" : "0.75rem", color: "rgba(255,255,255,0.3)", margin: 0 }}>Based on 3 sources</p>
                     </div>
                     <button onClick={toggleFullscreen} title={fullscreen ? "Exit fullscreen" : "Fullscreen"} style={{ background: "none", border: "none", cursor: "pointer", padding: 4, color: fullscreen ? "rgba(255,255,255,0.6)" : "rgba(255,255,255,0.25)", transition: "color 0.15s", display: "flex", alignItems: "center", marginTop: 2 }} className="action-btn">
@@ -1574,7 +1646,7 @@ function StudioSidebar({ isNew, view, onViewChange, fullscreen, onFullscreenChan
 
                 {/* Counter row */}
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: fullscreen ? 24 : 16 }}>
-                  <span style={{ fontSize: fullscreen ? "1rem" : "0.82rem", color: "rgba(255,255,255,0.35)", fontWeight: 500 }}>{quizIdx + 1} / {QUIZ.length}</span>
+                  <span style={{ fontSize: fullscreen ? "1rem" : "0.82rem", color: "rgba(255,255,255,0.35)", fontWeight: 500 }}>{quizIdx + 1} / {activeQuiz.length}</span>
                   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" style={{ opacity: 0.25 }}>
                     <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
                   </svg>
@@ -1642,7 +1714,7 @@ function StudioSidebar({ isNew, view, onViewChange, fullscreen, onFullscreenChan
                     onClick={handleQuizNext}
                     style={{ marginTop: fullscreen ? 24 : 16, padding: fullscreen ? "16px" : "11px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.15)", background: "rgba(255,255,255,0.08)", color: "white", fontSize: fullscreen ? "1rem" : "0.88rem", fontWeight: 600, cursor: "pointer", fontFamily: "inherit", transition: "opacity 0.15s" }}
                   >
-                    {quizIdx + 1 >= QUIZ.length ? "See Results" : "Next →"}
+                    {quizIdx + 1 >= activeQuiz.length ? "See Results" : "Next →"}
                   </button>
                 )}
 
@@ -2279,7 +2351,7 @@ function DashboardInner() {
         </div>
         {/* Studio box */}
         <div style={{ display: "contents" }}>
-          <StudioSidebar isNew={isNew} view={studioView} onViewChange={(v) => { setStudioView(v); if (v === "home") setStudioFullscreen(false); }} fullscreen={studioFullscreen} onFullscreenChange={setStudioFullscreen} />
+          <StudioSidebar isNew={isNew} view={studioView} onViewChange={(v) => { setStudioView(v); if (v === "home") setStudioFullscreen(false); }} fullscreen={studioFullscreen} onFullscreenChange={setStudioFullscreen} notebookId={notebookId} />
         </div>
       </div>
 

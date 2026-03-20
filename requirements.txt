@@ -9,7 +9,7 @@ psycopg2-binary>=2.9.9
 pgvector>=0.2.4
 numpy>=1.26.0
 
-# HTTP / LLM Integration (NVIDIA & Groq APIs via requests)
+# HTTP / LLM Integration (NVIDIA, Groq, Gemini APIs via requests)
 requests>=2.31.0
 
 # API Server
