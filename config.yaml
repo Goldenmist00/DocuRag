@@ -3,23 +3,16 @@
 # PDF Processing
 pdf:
   input_path: "data/raw/openstax_psychology_2e.pdf"
-  extract_images: false
-  preserve_layout: true
 
 # Text Chunking
 chunking:
-  strategy: "recursive"  # recursive, fixed, semantic
   chunk_size: 800        # ~150-200 words; sweet spot for dense academic text
   chunk_overlap: 100     # 100-char overlap preserves cross-boundary context
   min_chunk_size: 150    # discard captions / stray headers shorter than this
-  respect_sentence_boundaries: true
 
 # Embedding — NVIDIA API (nv-embed-v1, 4096d)
 embedding:
   tier: "nvidia"
-  batch_size: 96
-  normalize: true
-  cache_enabled: true
 
 # Vector Store (PostgreSQL + pgvector)
 vector_store:
@@ -31,20 +24,18 @@ vector_store:
     user: ""      # Read from POSTGRES_USER env var
     password: ""  # Always read from POSTGRES_PASSWORD env var
   table_name: "document_chunks"
-  vector_dimensions: 4096  # nv-embed-v1 output dim (4096 for nvidia, 384/768/1024 for local tiers)
-  index_type: "hnsw"    # ivfflat max is 2000d; hnsw required for 4096d
-  lists: 100  # for ivfflat
-  probes: 10  # for ivfflat search
+  index_type: "hnsw"
+  lists: 100  # for ivfflat (if used)
+  probes: 10  # for ivfflat search (if used)
 
 # Retrieval
 retrieval:
   top_k: 5
-  score_threshold: null  # Optional minimum similarity score
-  rerank: false
+  score_threshold: null
 
 # Generation (NVIDIA primary → Groq fallback)
 generation:
-  model: "meta/llama-3.3-70b-instruct"  # Best for RAG - good quality + rate limits
+  model: "meta/llama-3.3-70b-instruct"
   temperature: 0.3
   max_tokens: 512
   top_p: 0.9
@@ -54,15 +45,9 @@ cache:
   enabled: true
   embeddings_cache: "embeddings/cache"
   processed_chunks_path: "data/processed/chunks.jsonl"
-  use_content_hash: true
-
-# Reproducibility
-reproducibility:
-  random_seed: 42
-  deterministic: true
 
 # Logging
 logging:
-  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  level: "INFO"
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
   file: "logs/rag_system.log"

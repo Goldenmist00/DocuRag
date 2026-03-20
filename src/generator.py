@@ -58,15 +58,6 @@ class AnswerResult:
     latency_ms: float = 0.0
     chunks_used: int = 0
 
-    def to_dict(self) -> Dict:
-        return {
-            "question":    self.question,
-            "answer":      self.answer,
-            "citations":   self.citations,
-            "model":       self.model,
-            "latency_ms":  round(self.latency_ms, 1),
-            "chunks_used": self.chunks_used,
-        }
 
 
 class Generator:
@@ -297,13 +288,3 @@ class Generator:
                     "page_end":      c.page_end,
                 })
         return result
-
-
-def create_generator(cfg: Optional[Dict] = None) -> Generator:
-    cfg = cfg or {}
-    return Generator(
-        model=cfg.get("model") or None,
-        temperature=cfg.get("temperature", 0.3),
-        max_tokens=cfg.get("max_tokens", 512),
-        top_p=cfg.get("top_p", 0.9),
-    )

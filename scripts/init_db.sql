@@ -7,9 +7,9 @@ CREATE EXTENSION IF NOT EXISTS vector;
 -- Create table for document chunks with vector embeddings
 CREATE TABLE IF NOT EXISTS document_chunks (
     id SERIAL PRIMARY KEY,
-    chunk_id VARCHAR(32) UNIQUE NOT NULL,
+    chunk_id TEXT UNIQUE NOT NULL,
     text TEXT NOT NULL,
-    embedding vector(768),  -- 768 dimensions for balanced tier (BAAI/bge-base-en-v1.5)
+    embedding halfvec(4096),  -- 4096 dimensions for nvidia/nv-embed-v1
     
     -- Metadata for citations
     section_id VARCHAR(50),

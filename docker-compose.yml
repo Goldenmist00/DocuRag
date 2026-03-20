@@ -28,7 +28,6 @@ services:
     volumes:
       - ./data:/app/data
       - ./embeddings:/app/embeddings
-      - ./models:/app/models
       - ./outputs:/app/outputs
     env_file:
       - .env

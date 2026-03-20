@@ -54,10 +54,10 @@ pip list
 ### Key Libraries Explained
 
 - **PyPDF2/pdfplumber/pymupdf**: PDF text extraction (multiple options for robustness)
-- **sentence-transformers**: Local embedding model (no API needed)
-- **torch**: Required for sentence-transformers
-- **faiss-cpu**: Fast vector similarity search
+- **fastapi/uvicorn**: API server for the live demo
+- **psycopg2-binary/pgvector**: PostgreSQL + pgvector for vector storage and retrieval
 - **openai**: Used for NVIDIA API (compatible interface)
+- **spacy**: NLP text processing
 - **pandas**: Data manipulation and CSV output
 - **jsonlines**: Efficient storage of processed chunks
 
@@ -72,22 +72,16 @@ This creates:
 ```
 data/raw/              # Place PDF here
 data/processed/        # Chunked text storage
-embeddings/cache/      # Embedding cache
-vector_store/          # FAISS index
+embeddings/cache/      # Embedding cache (SHA-256 keyed .npz)
 models/                # Downloaded models
 outputs/               # Final submission.csv
 logs/                  # Application logs
 ```
 
-## 4. Download Models
+## 4. API Keys
 
-```bash
-# Pre-download embedding model (recommended)
-python scripts/download_models.py
-
-# This downloads ~80MB model to models/ directory
-# Subsequent runs will use cached model
-```
+The project uses NVIDIA API for embeddings (no local model downloads needed).
+Make sure you have a valid NVIDIA API key before proceeding.
 
 ## 5. Configuration
 
@@ -134,10 +128,10 @@ Expected `queries.json` format:
 ```bash
 # Run setup verification
 python -c "
-import torch
-import sentence_transformers
-import faiss
+import psycopg2
+import fastapi
 import PyPDF2
+import numpy
 print('✓ All core dependencies imported successfully')
 "
 ```
@@ -172,12 +166,9 @@ docker-compose run rag-app bash
 
 ## Troubleshooting
 
-### Issue: FAISS installation fails
+### Issue: PostgreSQL connection refused
 
-**Solution**: Try installing with conda:
-```bash
-conda install -c conda-forge faiss-cpu
-```
+**Solution**: Make sure PostgreSQL is running and `POSTGRES_SSLMODE=disable` is set in `.env` for local connections.
 
 ### Issue: PyTorch too large
 
@@ -210,24 +201,20 @@ BATCH_SIZE=8
 ## Best Practices
 
 1. **Version Control**: Commit `requirements.txt` but not `venv/` or cached data
-2. **Caching**: Keep embeddings and FAISS index cached to avoid recomputation
+2. **Caching**: Keep embeddings cached (SHA-256 keyed `.npz` files) to avoid recomputation
 3. **Reproducibility**: Use fixed random seeds in `config.yaml`
 4. **Testing**: Run on small subset first before full pipeline
 5. **Monitoring**: Check `logs/rag_system.log` for issues
 
 ## Performance Optimization
 
-- Use GPU if available (change `device: "cuda"` in config.yaml)
-- Increase batch size for faster embedding generation
-- Use FAISS GPU version for large-scale retrieval
-- Consider quantization for embedding model
+- Increase batch size for faster embedding generation via NVIDIA API
+- Use HNSW indexes in pgvector for faster similarity search
+- Tune `TOP_K` in `.env` for retrieval quality vs speed
 
 ## Next Steps
 
 After setup is complete:
-1. Implement PDF processing logic in `src/pdf_processor.py`
-2. Implement embedding generation in `src/embedder.py`
-3. Implement FAISS operations in `src/vector_store.py`
-4. Implement retrieval in `src/retriever.py`
-5. Implement generation in `src/generator.py`
-6. Wire everything together in `scripts/run_pipeline.py`
+1. Run the pipeline: `python scripts/run_pipeline.py --all`
+2. Or run step-by-step: `--step extract`, `--step embed`, `--step index`, `--step generate`
+3. Start the API server: `uvicorn src.api:app --reload --port 8000`
