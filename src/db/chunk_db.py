@@ -61,9 +61,11 @@ def insert_chunks(
             page_num, chunk_index, char_count, word_count
         ) VALUES %s
         ON CONFLICT (chunk_id) DO UPDATE SET
-            text       = EXCLUDED.text,
-            embedding  = EXCLUDED.embedding,
-            updated_at = CURRENT_TIMESTAMP
+            text        = EXCLUDED.text,
+            embedding   = EXCLUDED.embedding,
+            notebook_id = EXCLUDED.notebook_id,
+            source_id   = EXCLUDED.source_id,
+            updated_at  = CURRENT_TIMESTAMP
     """
 
     def _get(obj, attr, default=None):
