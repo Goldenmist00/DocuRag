@@ -2,7 +2,7 @@
 
 RAG system that answers questions from the OpenStax Psychology 2e textbook with citation-verifiable responses. Built for the NVIDIA hackathon.
 
-- Embedding: sentence-transformers (three tiers — fast / balanced / deep)
+- Embedding: NVIDIA API (`nvidia/nv-embed-v1`, 4096 dimensions)
 - Vector store: PostgreSQL + pgvector
 - Generation: NVIDIA API (`meta/llama-3.1-8b-instruct`)
 - Output: `submission.csv` with `ID`, `context`, `answer`, `references`
@@ -75,10 +75,10 @@ data/raw/openstax_psychology_2e.pdf
 
 ## Running the pipeline
 
-### Step 1 — Chunk the PDF
+### Step 1 — Extract and chunk the PDF
 
 ```bash
-python scripts/test_pdf_chunking.py data/raw/openstax_psychology_2e.pdf
+python scripts/run_pipeline.py --step extract
 ```
 
 Chunks are saved to `data/processed/chunks.jsonl`.
@@ -89,15 +89,9 @@ Chunks are saved to `data/processed/chunks.jsonl`.
 python scripts/embed_and_store.py --tier balanced --clear --create-index
 ```
 
-This embeds all chunks (uses cache on re-runs) and stores them in PostgreSQL.
+This embeds all chunks via the NVIDIA API (uses cache on re-runs) and stores them in PostgreSQL.
 
-Tier options:
-
-| Tier | Model | Dimensions | Speed |
-|------|-------|-----------|-------|
-| `fast` | all-MiniLM-L6-v2 | 384 | ~13 chunks/s |
-| `balanced` | BAAI/bge-base-en-v1.5 | 768 | ~3 chunks/s ⭐ |
-| `deep` | BAAI/bge-large-en-v1.5 | 1024 | ~1 chunks/s |
+The current embedder uses `nvidia/nv-embed-v1` (4096 dimensions) via API.
 
 ### Step 3 — Generate submission
 
@@ -178,7 +172,8 @@ DocuRag/
 │   ├── setup_postgres.py           # DB initialisation
 │   ├── embed_and_store.py          # Embedding + storage pipeline
 │   ├── generate_submission.py      # Main deliverable — writes submission.csv
-│   └── test_rag_pipeline.py        # Integration test
+│   ├── run_pipeline.py             # Pipeline orchestration (--step extract|embed|index|load|generate)
+│   └── pre_demo_test.py            # Pre-demo validation
 ├── config.yaml                     # All configuration
 ├── .env.example                    # Environment variable template
 └── requirements.txt

@@ -15,19 +15,14 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Download spacy model
-RUN python -m spacy download en_core_web_sm
-
 # Copy project files
 COPY . .
 
 # Create necessary directories
-RUN mkdir -p data/raw data/processed embeddings/cache vector_store/faiss_index models outputs
+RUN mkdir -p data/raw data/processed embeddings/cache outputs logs
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
-ENV TRANSFORMERS_CACHE=/app/models
-ENV HF_HOME=/app/models
 
 # Default command
 CMD ["python", "scripts/run_pipeline.py", "--help"]

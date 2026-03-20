@@ -120,7 +120,6 @@ def main():
         logger.info(f"✓ Embedder initialized")
         logger.info(f"  Model: {embedder.model_name}")
         logger.info(f"  Dimensions: {embedder.embedding_dim}")
-        logger.info(f"  Device: {embedder.device}")
         
         # Step 3: Generate embeddings
         logger.info("\n" + "=" * 70)

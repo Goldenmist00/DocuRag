@@ -191,7 +191,7 @@ async def query(request: QueryRequest) -> QueryResponse:
     """
     Retrieve relevant passages and generate a grounded answer.
 
-    - Embeds the question using the configured sentence-transformer tier
+    - Embeds the question using the NVIDIA nv-embed-v1 API
     - Searches PostgreSQL for the top-k most similar chunks
     - Calls the NVIDIA LLM to generate a cited answer
     - Returns the answer, citations, and source metadata

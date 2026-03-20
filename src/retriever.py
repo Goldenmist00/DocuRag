@@ -11,9 +11,8 @@ both the Generator and the submission pipeline.
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -51,18 +50,6 @@ class RetrievedChunk:
             parts.append(f"p.{self.page_start}")
         return " | ".join(parts) if parts else self.chunk_id
 
-    def to_dict(self) -> Dict:
-        return {
-            "chunk_id":      self.chunk_id,
-            "text":          self.text,
-            "score":         round(self.score, 4),
-            "section_id":    self.section_id,
-            "chapter_id":    self.chapter_id,
-            "section_title": self.section_title,
-            "page_start":    self.page_start,
-            "page_end":      self.page_end,
-            "chunk_index":   self.chunk_index,
-        }
 
 
 # ---------------------------------------------------------------------------
@@ -115,24 +102,6 @@ class Retriever:
 
         logger.debug("Retrieved %d chunks for query: %.60s", len(chunks), query)
         return chunks
-
-    def retrieve_with_stats(
-        self, query: str, top_k: Optional[int] = None
-    ) -> Tuple[List[RetrievedChunk], Dict]:
-        """Same as retrieve() but also returns timing and score statistics."""
-        t0 = time.time()
-        chunks = self.retrieve(query, top_k=top_k)
-        elapsed_ms = (time.time() - t0) * 1000
-
-        scores = [c.score for c in chunks]
-        stats = {
-            "num_chunks": len(chunks),
-            "latency_ms": round(elapsed_ms, 1),
-            "top_score":  round(max(scores), 4) if scores else 0.0,
-            "min_score":  round(min(scores), 4) if scores else 0.0,
-            "avg_score":  round(sum(scores) / len(scores), 4) if scores else 0.0,
-        }
-        return chunks, stats
 
     def _to_chunk(self, row: Dict) -> RetrievedChunk:
         """Map a raw DB result row dict to a typed RetrievedChunk."""
