@@ -400,3 +400,20 @@ input:-webkit-autofill:focus {
   box-shadow: 0 0 15px rgba(255, 255, 255, 0.1);
 }
 
+/* ── GPU-composited animation layers ── */
+[data-us-project] canvas {
+  will-change: transform;
+  contain: strict;
+}
+
+.animate-ping,
+.animate-pulse {
+  will-change: transform, opacity;
+}
+
+/* Force 3D compositing for smooth cursor and orbit transforms */
+.pointer-events-none[style*="translate3d"] {
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+

@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 _pool: Optional[pool.ThreadedConnectionPool] = None
 
 
-def get_pool(min_conn: int = 1, max_conn: int = 10) -> pool.ThreadedConnectionPool:
+def get_pool(min_conn: int = 1, max_conn: int = 5) -> pool.ThreadedConnectionPool:
     """
     Return the shared connection pool, creating it on first call.
 
@@ -52,6 +52,11 @@ def get_pool(min_conn: int = 1, max_conn: int = 10) -> pool.ThreadedConnectionPo
         "user":     os.environ.get("POSTGRES_USER", "postgres"),
         "password": password,
         "sslmode":  os.environ.get("POSTGRES_SSLMODE", "require"),
+        "connect_timeout":     30,
+        "keepalives":          1,
+        "keepalives_idle":     30,
+        "keepalives_interval": 10,
+        "keepalives_count":    3,
     }
 
     _pool = pool.ThreadedConnectionPool(min_conn, max_conn, **params)
@@ -66,12 +71,30 @@ def get_connection() -> Generator:
 
     Automatically commits on success, rolls back on error,
     and returns the connection to the pool in all cases.
+
+    Handles Neon's aggressive idle-connection drops by detecting
+    stale connections during ``register_vector`` (the first real
+    SQL query) and transparently replacing them.
     """
     p = get_pool()
     conn = None
     try:
         conn = p.getconn()
-        register_vector(conn)
+        if conn.closed:
+            p.putconn(conn, close=True)
+            conn = p.getconn()
+
+        try:
+            register_vector(conn)
+        except psycopg2.OperationalError:
+            logger.warning("Stale connection detected, replacing")
+            try:
+                p.putconn(conn, close=True)
+            except Exception:
+                pass
+            conn = p.getconn()
+            register_vector(conn)
+
         yield conn
         conn.commit()
     except Exception:

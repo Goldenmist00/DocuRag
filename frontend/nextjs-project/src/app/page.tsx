@@ -1,15 +1,15 @@
 "use client"
 
-import { useState, useRef, useEffect } from "react"
+import { useState, useRef, useEffect, memo } from "react"
 import { motion, useScroll, AnimatePresence } from "framer-motion"
 import { IntroAnimation } from "./components/landing/intro-animation"
 import MagneticCursor from "./components/landing/magnetic-cursor"
 import HeroAscii from "@/components/ui/hero-ascii"
-import { FileText, MessageSquare, ClipboardList, Search, ShieldCheck, Smartphone } from "lucide-react"
+import { FileText, MessageSquare, ClipboardList, Search, ShieldCheck, Smartphone, BookOpen, Quote, FileCheck, Eye } from "lucide-react"
 import RadialOrbitalTimeline from "@/components/ui/radial-orbital-timeline"
 
 /* ─── Floating 3D Card ─── */
-function FloatingCard({ children, style = {} }: { children: React.ReactNode; style?: React.CSSProperties }) {
+const FloatingCard = memo(function FloatingCard({ children, style = {} }: { children: React.ReactNode; style?: React.CSSProperties }) {
   const ref = useRef<HTMLDivElement>(null)
   const [visible, setVisible] = useState(false)
   const [tilt, setTilt] = useState({ x: 0, y: 0 })
@@ -28,10 +28,10 @@ function FloatingCard({ children, style = {} }: { children: React.ReactNode; sty
       </motion.div>
     </motion.div>
   )
-}
+})
 
 /* ─── Section Label ─── */
-function SectionLabel({ children }: { children: React.ReactNode }) {
+const SectionLabel = memo(function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
     <motion.div initial={{ opacity: 0, y: 12 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true }} transition={{ duration: 0.5 }}
       style={{ display: "inline-flex", alignItems: "center", gap: 10, marginBottom: "1.25rem" }}>
@@ -40,7 +40,7 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
       <div style={{ width: 20, height: 1, background: "linear-gradient(90deg, rgba(255,255,255,0.25), transparent)" }} />
     </motion.div>
   )
-}
+})
 
 /* ─── Main Page ─── */
 export default function Home() {
@@ -148,6 +148,137 @@ export default function Home() {
               </div>
 
               <RadialOrbitalTimeline timelineData={timelineData} />
+            </section>
+
+            {/* ══ CITATIONS ══ */}
+            <section id="citations" style={{ position: "relative", overflow: "hidden", padding: "7rem 1.5rem 6rem" }}>
+              {/* background orb */}
+              <div style={{ position: "absolute", top: "30%", right: "-5%", width: 500, height: 500, borderRadius: "50%", background: "radial-gradient(circle, rgba(255,255,255,0.02) 0%, transparent 65%)", pointerEvents: "none", filter: "blur(60px)" }} />
+
+              <div style={{ maxWidth: 1100, margin: "0 auto", position: "relative", zIndex: 10 }}>
+
+                <div style={{ textAlign: "center", marginBottom: "4rem" }}>
+                  <SectionLabel>Verifiable answers</SectionLabel>
+                  <motion.h2 initial={{ opacity: 0, y: 28 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true }} transition={{ duration: 0.55 }}
+                    style={{ fontFamily: "var(--font-hero-display)", fontSize: "clamp(2rem, 4vw, 3.2rem)", fontWeight: 800, color: "#fff", marginBottom: "1rem", letterSpacing: "0.04em", textTransform: "uppercase" }}>
+                    Every Answer Has Proof
+                  </motion.h2>
+                  <motion.p initial={{ opacity: 0, y: 16 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true }} transition={{ duration: 0.55, delay: 0.12 }}
+                    style={{ fontFamily: "var(--font-hero-body)", fontSize: "0.95rem", color: "rgba(255,255,255,0.35)", maxWidth: 560, margin: "0 auto", lineHeight: 1.8 }}>
+                    Unlike generic AI tools, MindSync ties every response directly to your source material — so you never have to wonder where the information came from.
+                  </motion.p>
+                </div>
+
+                {/* citation cards grid */}
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: "1.25rem", marginBottom: "4rem" }}>
+
+                  {/* card 1 */}
+                  <motion.div initial={{ opacity: 0, y: 32 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true }} transition={{ duration: 0.55, delay: 0.05 }}
+                    style={{ padding: "2rem 1.75rem", borderRadius: "1rem", border: "1px solid rgba(255,255,255,0.06)", background: "rgba(255,255,255,0.02)" }}>
+                    <div style={{ width: 40, height: 40, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", border: "1px solid rgba(255,255,255,0.1)", background: "rgba(255,255,255,0.03)", marginBottom: "1.25rem" }}>
+                      <BookOpen size={18} style={{ color: "rgba(255,255,255,0.6)" }} />
+                    </div>
+                    <h3 style={{ fontFamily: "var(--font-hero-display)", fontSize: "1.05rem", fontWeight: 700, color: "#fff", marginBottom: "0.6rem", letterSpacing: "0.02em" }}>
+                      Page-Level References
+                    </h3>
+                    <p style={{ fontFamily: "var(--font-hero-body)", fontSize: "0.85rem", color: "rgba(255,255,255,0.35)", lineHeight: 1.8 }}>
+                      Every answer includes the exact page number and section title from your textbook. Click any citation to jump straight to the original passage.
+                    </p>
+                  </motion.div>
+
+                  {/* card 2 */}
+                  <motion.div initial={{ opacity: 0, y: 32 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true }} transition={{ duration: 0.55, delay: 0.12 }}
+                    style={{ padding: "2rem 1.75rem", borderRadius: "1rem", border: "1px solid rgba(255,255,255,0.06)", background: "rgba(255,255,255,0.02)" }}>
+                    <div style={{ width: 40, height: 40, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", border: "1px solid rgba(255,255,255,0.1)", background: "rgba(255,255,255,0.03)", marginBottom: "1.25rem" }}>
+                      <Quote size={18} style={{ color: "rgba(255,255,255,0.6)" }} />
+                    </div>
+                    <h3 style={{ fontFamily: "var(--font-hero-display)", fontSize: "1.05rem", fontWeight: 700, color: "#fff", marginBottom: "0.6rem", letterSpacing: "0.02em" }}>
+                      Direct Quotations
+                    </h3>
+                    <p style={{ fontFamily: "var(--font-hero-body)", fontSize: "0.85rem", color: "rgba(255,255,255,0.35)", lineHeight: 1.8 }}>
+                      Responses highlight the exact text from your material that supports each claim. No paraphrasing guesswork — see the author&apos;s own words.
+                    </p>
+                  </motion.div>
+
+                  {/* card 3 */}
+                  <motion.div initial={{ opacity: 0, y: 32 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true }} transition={{ duration: 0.55, delay: 0.19 }}
+                    style={{ padding: "2rem 1.75rem", borderRadius: "1rem", border: "1px solid rgba(255,255,255,0.06)", background: "rgba(255,255,255,0.02)" }}>
+                    <div style={{ width: 40, height: 40, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", border: "1px solid rgba(255,255,255,0.1)", background: "rgba(255,255,255,0.03)", marginBottom: "1.25rem" }}>
+                      <FileCheck size={18} style={{ color: "rgba(255,255,255,0.6)" }} />
+                    </div>
+                    <h3 style={{ fontFamily: "var(--font-hero-display)", fontSize: "1.05rem", fontWeight: 700, color: "#fff", marginBottom: "0.6rem", letterSpacing: "0.02em" }}>
+                      Confidence Scoring
+                    </h3>
+                    <p style={{ fontFamily: "var(--font-hero-body)", fontSize: "0.85rem", color: "rgba(255,255,255,0.35)", lineHeight: 1.8 }}>
+                      Each citation carries a relevance score so you know how closely the source matches your question. High confidence means a direct match.
+                    </p>
+                  </motion.div>
+
+                </div>
+
+                {/* citation demo visual */}
+                <motion.div initial={{ opacity: 0, y: 28 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true }} transition={{ duration: 0.6, delay: 0.1 }}
+                  style={{ maxWidth: 720, margin: "0 auto", borderRadius: "1rem", border: "1px solid rgba(255,255,255,0.06)", background: "rgba(255,255,255,0.015)", overflow: "hidden" }}>
+
+                  {/* demo header */}
+                  <div style={{ padding: "1rem 1.5rem", borderBottom: "1px solid rgba(255,255,255,0.06)", display: "flex", alignItems: "center", gap: 8 }}>
+                    <Eye size={14} style={{ color: "rgba(255,255,255,0.3)" }} />
+                    <span style={{ fontFamily: "var(--font-hero-mono)", fontSize: "0.65rem", letterSpacing: "0.2em", textTransform: "uppercase", color: "rgba(255,255,255,0.3)", fontWeight: 500 }}>
+                      Citation Preview
+                    </span>
+                  </div>
+
+                  <div style={{ padding: "1.75rem 1.5rem" }}>
+                    {/* question */}
+                    <div style={{ marginBottom: "1.25rem" }}>
+                      <span style={{ fontFamily: "var(--font-hero-mono)", fontSize: "0.6rem", letterSpacing: "0.15em", textTransform: "uppercase", color: "rgba(255,255,255,0.2)", display: "block", marginBottom: 6 }}>
+                        Question
+                      </span>
+                      <p style={{ fontFamily: "var(--font-hero-body)", fontSize: "0.9rem", color: "rgba(255,255,255,0.7)", lineHeight: 1.6 }}>
+                        &ldquo;What is the difference between supervised and unsupervised learning?&rdquo;
+                      </p>
+                    </div>
+
+                    {/* answer snippet */}
+                    <div style={{ marginBottom: "1.25rem" }}>
+                      <span style={{ fontFamily: "var(--font-hero-mono)", fontSize: "0.6rem", letterSpacing: "0.15em", textTransform: "uppercase", color: "rgba(255,255,255,0.2)", display: "block", marginBottom: 6 }}>
+                        Answer
+                      </span>
+                      <p style={{ fontFamily: "var(--font-hero-body)", fontSize: "0.85rem", color: "rgba(255,255,255,0.5)", lineHeight: 1.8 }}>
+                        Supervised learning uses labeled data where the correct output is known during training, while unsupervised learning discovers hidden patterns in unlabeled data without predefined answers.
+                      </p>
+                    </div>
+
+                    {/* citation references */}
+                    <div style={{ borderTop: "1px solid rgba(255,255,255,0.05)", paddingTop: "1rem" }}>
+                      <span style={{ fontFamily: "var(--font-hero-mono)", fontSize: "0.6rem", letterSpacing: "0.15em", textTransform: "uppercase", color: "rgba(255,255,255,0.2)", display: "block", marginBottom: 10 }}>
+                        Sources
+                      </span>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "0.6rem 0.8rem", borderRadius: 6, border: "1px solid rgba(255,255,255,0.06)", background: "rgba(255,255,255,0.02)" }}>
+                          <ShieldCheck size={13} style={{ color: "rgba(255,255,255,0.4)", flexShrink: 0 }} />
+                          <span style={{ fontFamily: "var(--font-hero-body)", fontSize: "0.78rem", color: "rgba(255,255,255,0.45)" }}>
+                            Chapter 3: Machine Learning Fundamentals
+                          </span>
+                          <span style={{ fontFamily: "var(--font-hero-mono)", fontSize: "0.65rem", color: "rgba(255,255,255,0.2)", marginLeft: "auto", flexShrink: 0 }}>
+                            p. 47
+                          </span>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "0.6rem 0.8rem", borderRadius: 6, border: "1px solid rgba(255,255,255,0.06)", background: "rgba(255,255,255,0.02)" }}>
+                          <ShieldCheck size={13} style={{ color: "rgba(255,255,255,0.4)", flexShrink: 0 }} />
+                          <span style={{ fontFamily: "var(--font-hero-body)", fontSize: "0.78rem", color: "rgba(255,255,255,0.45)" }}>
+                            Section 3.2: Types of Learning Algorithms
+                          </span>
+                          <span style={{ fontFamily: "var(--font-hero-mono)", fontSize: "0.65rem", color: "rgba(255,255,255,0.2)", marginLeft: "auto", flexShrink: 0 }}>
+                            p. 52
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </motion.div>
+
+              </div>
             </section>
 
             {/* ══ CTA ══ */}

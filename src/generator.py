@@ -39,7 +39,16 @@ Rules:
 - Base your answer strictly on the context below.
 - Cite sources using [1], [2], etc. matching the numbered passages.
 - If the context does not contain enough information, say so clearly.
-- Be concise and accurate. Do not fabricate information."""
+- Do not fabricate information.
+
+Formatting (you MUST follow these rules):
+- Use **bold** for key terms and important concepts.
+- Use bullet points (- item) or numbered lists (1. item) when listing multiple items.
+- Always use ### before section headings. Example: ### Key Issues
+- Keep paragraphs short (2-3 sentences each).
+- Place citation markers [1], [2] inline next to the relevant claim.
+- Never use # or ## headings — only ### for headings.
+- Separate sections with a blank line before each ### heading."""
 
 USER_TEMPLATE = """Context passages:
 {context}
@@ -70,7 +79,7 @@ class Generator:
         self,
         model: Optional[str] = None,
         temperature: float = 0.3,
-        max_tokens: int = 512,
+        max_tokens: int = 1024,
         top_p: float = 0.9,
         api_key: Optional[str] = None,
         max_retries: int = 2,
