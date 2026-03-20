@@ -7,6 +7,7 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import {
   askQuestion,
+  batchQueryFromFile,
   listSources,
   uploadSourceWithProgress,
   addTextSource,
@@ -26,6 +27,8 @@ import {
   type MindMapData,
   type QuizQuestion,
   type PodcastRecord,
+  type AnswerGrade,
+  type BatchQueryResult,
 } from "@/lib/api";
 import { useToast } from "@/components/ui/toast";
 
@@ -77,7 +80,7 @@ const isTerminalStatus = (status: string) => status === "ready" || status === "e
 
 /* ─── types ─── */
 type SourceAttribution = { name: string; pages: number[] };
-type Message = { id: number; role: "user" | "ai"; text: string; sourceAttrs?: SourceAttribution[]; attachments?: string[] };
+type Message = { id: number; role: "user" | "ai"; text: string; sourceAttrs?: SourceAttribution[]; attachments?: string[]; grade?: AnswerGrade | null };
 type StudioView = "home" | "flashcards" | "mindmap" | "summary" | "quiz" | "podcast";
 
 /* ─── sample data ─── */
@@ -499,8 +502,24 @@ function ChatArea({ isNew, notebookId, onUploadFiles }: { isNew: boolean; notebo
   };
 
   /**
+   * Check if a file should be treated as a batch question file
+   * rather than a source upload.
+   */
+  const isQuestionFile = (file: File, inputText: string): boolean => {
+    const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
+    if (ext === "json") return true;
+    if (ext === "pdf") {
+      const hint = inputText.toLowerCase();
+      const batchKeywords = ["answer", "questions", "batch", "solve", "respond", "reply"];
+      return batchKeywords.some(kw => hint.includes(kw));
+    }
+    return false;
+  };
+
+  /**
    * Send message with optional file attachments.
-   * Uploads attached files as notebook sources first, then asks the question.
+   * Detects question files (JSON / PDF with batch keywords) and
+   * routes them to batch Q&A. Otherwise uploads as notebook sources.
    */
   const send = async () => {
     if ((!input.trim() && attachedFiles.length === 0) || loading) return;
@@ -514,24 +533,78 @@ function ChatArea({ isNew, notebookId, onUploadFiles }: { isNew: boolean; notebo
     };
     setMessages(p => [...p, userMsg]);
     setInput("");
-    const filesToUpload = [...attachedFiles];
+    const filesToProcess = [...attachedFiles];
     setAttachedFiles([]);
     setLoading(true);
+
+    const questionFiles = filesToProcess.filter(f => isQuestionFile(f, questionText));
+    const sourceFiles = filesToProcess.filter(f => !isQuestionFile(f, questionText));
+
     try {
-      if (filesToUpload.length > 0 && notebookId) {
-        onUploadFiles?.(filesToUpload);
+      if (sourceFiles.length > 0 && notebookId) {
+        onUploadFiles?.(sourceFiles);
         await Promise.all(
-          filesToUpload.map(f => uploadSourceWithProgress(notebookId, f))
+          sourceFiles.map(f => uploadSourceWithProgress(notebookId, f))
         );
       }
-      const result = await askQuestion(
-        questionText || `Summarize and analyze the uploaded files: ${fileNames.join(", ")}`,
-        10,
-        notebookId ?? undefined,
-      );
-      const attrs = buildAttrs(result.sources);
-      const aiMsg: Message = { id: Date.now() + 1, role: "ai", text: result.answer, sourceAttrs: attrs };
-      setMessages(p => [...p, aiMsg]);
+
+      if (questionFiles.length > 0 && notebookId) {
+        const statusMsg: Message = {
+          id: Date.now() + 1,
+          role: "ai",
+          text: `Processing **${questionFiles.map(f => f.name).join(", ")}** — extracting and answering questions...`,
+        };
+        setMessages(p => [...p, statusMsg]);
+
+        for (const qFile of questionFiles) {
+          const batch = await batchQueryFromFile(notebookId, qFile, 10);
+
+          const summaryMsg: Message = {
+            id: Date.now() + 2,
+            role: "ai",
+            text: `**${qFile.name}** — ${batch.answered} of ${batch.total_questions} questions answered`
+              + (batch.failed > 0 ? ` (${batch.failed} failed)` : "")
+              + ` in ${(batch.total_latency_ms / 1000).toFixed(1)}s`,
+          };
+          setMessages(p => [...p, summaryMsg]);
+
+          const qaPairs: Message[] = [];
+          for (const r of batch.results) {
+            const ts = Date.now() + qaPairs.length * 2;
+            qaPairs.push({
+              id: ts,
+              role: "user",
+              text: r.question,
+            });
+            if (r.error) {
+              qaPairs.push({
+                id: ts + 1,
+                role: "ai",
+                text: `Failed: ${r.error}`,
+              });
+            } else {
+              const attrs = r.sources?.length ? buildAttrs(r.sources) : undefined;
+              qaPairs.push({
+                id: ts + 1,
+                role: "ai",
+                text: r.answer ?? "No answer generated.",
+                sourceAttrs: attrs,
+                grade: r.grade,
+              });
+            }
+          }
+          setMessages(p => [...p, ...qaPairs]);
+        }
+      } else {
+        const result = await askQuestion(
+          questionText || `Summarize and analyze the uploaded files: ${fileNames.join(", ")}`,
+          10,
+          notebookId ?? undefined,
+        );
+        const attrs = buildAttrs(result.sources);
+        const aiMsg: Message = { id: Date.now() + 1, role: "ai", text: result.answer, sourceAttrs: attrs, grade: result.grade };
+        setMessages(p => [...p, aiMsg]);
+      }
     } catch (err: unknown) {
       const detail = err instanceof Error ? err.message : String(err);
       const errMsg: Message = {
@@ -743,6 +816,61 @@ function ChatArea({ isNew, notebookId, onUploadFiles }: { isNew: boolean; notebo
                       )}
                     </div>
                   ))}
+                </div>
+              )}
+              {/* Answer confidence badge */}
+              {m.role === "ai" && m.grade && (
+                <div style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  marginTop: 6,
+                  padding: "4px 10px",
+                  borderRadius: 6,
+                  background: m.grade.overall >= 0.8
+                    ? "rgba(34,197,94,0.08)"
+                    : m.grade.overall >= 0.6
+                    ? "rgba(234,179,8,0.08)"
+                    : "rgba(239,68,68,0.08)",
+                  border: `1px solid ${
+                    m.grade.overall >= 0.8
+                      ? "rgba(34,197,94,0.25)"
+                      : m.grade.overall >= 0.6
+                      ? "rgba(234,179,8,0.25)"
+                      : "rgba(239,68,68,0.25)"
+                  }`,
+                  fontSize: "0.66rem",
+                  color: m.grade.overall >= 0.8
+                    ? "rgba(34,197,94,0.9)"
+                    : m.grade.overall >= 0.6
+                    ? "rgba(234,179,8,0.9)"
+                    : "rgba(239,68,68,0.9)",
+                }}>
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" style={{ flexShrink: 0 }}>
+                    {m.grade.overall >= 0.8 ? (
+                      <path d="M22 11.08V12a10 10 0 11-5.93-9.14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                    ) : m.grade.overall >= 0.6 ? (
+                      <path d="M12 9v4m0 4h.01M12 2a10 10 0 100 20 10 10 0 000-20z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                    ) : (
+                      <path d="M12 8v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                    )}
+                    {m.grade.overall >= 0.8 && (
+                      <path d="M22 4L12 14.01l-3-3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                    )}
+                  </svg>
+                  <span>
+                    {m.grade.overall >= 0.8
+                      ? "High confidence"
+                      : m.grade.overall >= 0.6
+                      ? "Moderate confidence"
+                      : "Low confidence"}
+                    {" "}({Math.round(m.grade.overall * 100)}%)
+                  </span>
+                  <span style={{ opacity: 0.5, fontSize: "0.6rem" }}>
+                    F:{Math.round(m.grade.faithfulness * 100)}
+                    {" "}C:{Math.round(m.grade.completeness * 100)}
+                    {" "}R:{Math.round(m.grade.citation_accuracy * 100)}
+                  </span>
                 </div>
               )}
             </div>
