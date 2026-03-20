@@ -18,7 +18,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -136,8 +136,87 @@ def add_text_source(notebook_id: str, name: str, text: str) -> Dict:
 
 _EMBED_BATCH_SIZE = 48
 _MAX_CHUNK_CHARS = 3000
-_MIN_CHUNK_CHARS = 80
+_MIN_CHUNK_CHARS = 150
+_MIN_LETTER_RATIO = 0.4
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+_COVERAGE_WARN_THRESHOLD = 0.55
+_COVERAGE_MIN_THRESHOLD = 0.30
+
+
+def _validate_coverage(coverage: Dict, chunk_chars: int, source_id: str) -> List[str]:
+    """
+    Validate extraction coverage and return a list of warnings.
+
+    Compares character counts at each pipeline stage to flag
+    abnormal text loss. A healthy PDF pipeline retains 70-95%
+    of raw text through to chunks (some loss from headers,
+    footers, TOC, cleaning is expected).
+
+    Args:
+        coverage: Dict with raw_chars, extracted_chars, section_chars.
+        chunk_chars: Total characters across all chunks.
+        source_id: For logging context.
+
+    Returns:
+        List of warning strings (empty if all OK).
+    """
+    warnings: List[str] = []
+    raw = coverage.get("raw_chars", 0)
+
+    if raw == 0:
+        warnings.append("Could not determine raw text size — coverage validation skipped")
+        return warnings
+
+    extracted = coverage.get("extracted_chars", 0)
+    section = coverage.get("section_chars", 0)
+
+    extract_ratio = extracted / raw if raw else 1.0
+    section_ratio = section / raw if raw else 1.0
+    chunk_ratio = chunk_chars / raw if raw else 1.0
+
+    logger.info(
+        "Coverage report (source=%s): raw=%d → extracted=%d (%.0f%%) → sections=%d (%.0f%%) → chunks=%d (%.0f%%)",
+        source_id, raw, extracted, extract_ratio * 100,
+        section, section_ratio * 100, chunk_chars, chunk_ratio * 100,
+    )
+
+    empty_pages = coverage.get("pages_empty", 0)
+    total_pages = coverage.get("pages_total", 0)
+    if total_pages and empty_pages / total_pages > 0.3:
+        warnings.append(
+            f"{empty_pages}/{total_pages} pages produced <10 chars — "
+            "possible scanned/image-only pages without OCR"
+        )
+
+    if extract_ratio < _COVERAGE_WARN_THRESHOLD:
+        warnings.append(
+            f"Extraction retained only {extract_ratio:.0%} of raw text — "
+            "header/footer stripping or block extraction may be too aggressive"
+        )
+
+    if section_ratio < _COVERAGE_WARN_THRESHOLD:
+        warnings.append(
+            f"Section detection retained only {section_ratio:.0%} of raw text — "
+            "text before first section marker or between markers may be lost"
+        )
+
+    if chunk_ratio < _COVERAGE_MIN_THRESHOLD:
+        warnings.append(
+            f"Only {chunk_ratio:.0%} of raw text reached chunks — "
+            "significant content loss detected"
+        )
+    elif chunk_ratio < _COVERAGE_WARN_THRESHOLD:
+        warnings.append(
+            f"Chunk coverage is {chunk_ratio:.0%} — "
+            "some content may have been filtered by quality checks"
+        )
+
+    for w in warnings:
+        logger.warning("Coverage warning (source=%s): %s", source_id, w)
+
+    return warnings
 
 
 def process_source(source_id: str) -> None:
@@ -146,9 +225,10 @@ def process_source(source_id: str) -> None:
 
     Stages:
       1. extracting   — PDF / JSON / text extraction into sections
-      2. chunking     — text-based paragraph grouping (no API call)
-      3. embedding    — embed chunks with streamed DB inserts
-      4. ready        — all done
+      2. validating   — coverage check across extraction stages
+      3. chunking     — text-based paragraph grouping (no API call)
+      4. embedding    — embed chunks with streamed DB inserts
+      5. ready        — all done
 
     Uses text-based chunking instead of paragraph-level embedding
     to eliminate a full round of NVIDIA API calls, and streams
@@ -166,7 +246,7 @@ def process_source(source_id: str) -> None:
 
     try:
         _set_status(source_id, "extracting")
-        sections = _extract_sections(source)
+        sections, coverage = _extract_sections(source)
 
         if not sections:
             source_db.update_source(source_id, status="ready", chunk_count=0)
@@ -183,6 +263,9 @@ def process_source(source_id: str) -> None:
             logger.warning("Source %s produced 0 chunks", source_id)
             return
 
+        chunk_chars = sum(c["char_count"] for c in chunk_dicts)
+        coverage_warnings = _validate_coverage(coverage, chunk_chars, source_id)
+
         _set_status(source_id, "embedding")
         inserted = _stream_embed_and_store(
             chunk_dicts, embedder, notebook_id, source_id,
@@ -190,6 +273,12 @@ def process_source(source_id: str) -> None:
 
         source_db.update_source(source_id, status="ready", chunk_count=inserted)
         logger.info("Source %s ready — %d chunks stored", source_id, inserted)
+
+        if coverage_warnings:
+            logger.warning(
+                "Source %s completed with %d coverage warning(s)",
+                source_id, len(coverage_warnings),
+            )
 
     except Exception as exc:
         logger.error("Source %s processing failed: %s", source_id, exc, exc_info=True)
@@ -275,9 +364,12 @@ def _validate_notebook(notebook_id: str) -> None:
         raise ValueError(f"Notebook not found: {notebook_id}")
 
 
-def _extract_sections(source: Dict) -> List[SectionBlock]:
+def _extract_sections(source: Dict) -> Tuple[List[SectionBlock], Dict]:
     """
     Extract text from a source and produce SectionBlock objects.
+
+    Returns a coverage dict alongside sections so the pipeline can
+    validate that text was not silently lost during extraction.
 
     For PDFs: extract_pages -> detect_sections.
     For JSON: parse and flatten text content.
@@ -287,8 +379,17 @@ def _extract_sections(source: Dict) -> List[SectionBlock]:
         source: Source dict from DB.
 
     Returns:
-        List of SectionBlock objects.
+        Tuple of (sections list, coverage dict with raw/extracted char counts).
     """
+    coverage: Dict = {
+        "raw_chars": 0,
+        "extracted_chars": 0,
+        "section_chars": 0,
+        "pages_total": 0,
+        "pages_empty": 0,
+        "toc_pages_skipped": 0,
+    }
+
     if source["source_type"] == "file":
         file_path = source.get("file_path", "")
         if not file_path or not Path(file_path).exists():
@@ -297,16 +398,40 @@ def _extract_sections(source: Dict) -> List[SectionBlock]:
         ext = Path(file_path).suffix.lower()
 
         if ext == ".json":
-            return _extract_json_sections(file_path, source.get("name", "JSON file"))
+            sections = _extract_json_sections(file_path, source.get("name", "JSON file"))
+            total = sum(len(s.text) for s in sections)
+            coverage["raw_chars"] = total
+            coverage["extracted_chars"] = total
+            coverage["section_chars"] = total
+            return sections, coverage
 
         pages = extract_pages(file_path)
-        return detect_sections(pages)
+        coverage["pages_total"] = len(pages)
+        coverage["extracted_chars"] = sum(len(p.text) for p in pages)
+        coverage["pages_empty"] = sum(1 for p in pages if len(p.text.strip()) < 10)
+
+        import fitz
+        try:
+            with fitz.open(file_path) as doc:
+                coverage["raw_chars"] = sum(
+                    len(doc[i].get_text("text")) for i in range(len(doc))
+                )
+        except Exception:
+            coverage["raw_chars"] = coverage["extracted_chars"]
+
+        sections = detect_sections(pages)
+        coverage["section_chars"] = sum(len(s.text) for s in sections)
+        return sections, coverage
 
     text = source.get("raw_content", "")
     if not text:
-        return []
+        return [], coverage
 
-    return [SectionBlock(
+    coverage["raw_chars"] = len(text)
+    coverage["extracted_chars"] = len(text)
+    coverage["section_chars"] = len(text)
+
+    sections = [SectionBlock(
         chapter_id="0",
         section_id="0.0",
         section_title=source.get("name", "Pasted text"),
@@ -314,6 +439,7 @@ def _extract_sections(source: Dict) -> List[SectionBlock]:
         page_end=1,
         text=text,
     )]
+    return sections, coverage
 
 
 def _split_paragraphs(text: str) -> List[str]:
@@ -361,12 +487,33 @@ def _split_by_max_size(paragraphs: List[str], max_chars: int) -> List[str]:
     return result
 
 
+def _has_enough_content(text: str) -> bool:
+    """
+    Check that a chunk has enough alphabetic content to produce a
+    meaningful embedding vector.
+
+    Rejects chunks that are mostly numbers, symbols, or list markers.
+
+    Args:
+        text: Candidate chunk text.
+
+    Returns:
+        True if the chunk is worth embedding.
+    """
+    if len(text) < _MIN_CHUNK_CHARS:
+        return False
+    alpha = sum(1 for c in text if c.isalpha())
+    return (alpha / len(text)) >= _MIN_LETTER_RATIO
+
+
 def _text_chunk(sections: List[SectionBlock]) -> List[Dict]:
     """
-    Fast text-based chunking using paragraph grouping by size.
+    Fast text-based chunking with quality filtering.
 
     Groups paragraphs within each section up to _MAX_CHUNK_CHARS,
-    respecting section boundaries. No API calls — purely local.
+    respecting section boundaries. Filters out chunks that are too
+    short or lack meaningful text content. Deduplicates across
+    sections by content hash to catch pull quotes / repeated blocks.
 
     Args:
         sections: List of SectionBlock objects from extraction.
@@ -376,6 +523,7 @@ def _text_chunk(sections: List[SectionBlock]) -> List[Dict]:
     """
     chunk_dicts: List[Dict] = []
     chunk_idx = 0
+    seen_content: set = set()
 
     for section in sections:
         paras = _split_paragraphs(section.text)
@@ -385,8 +533,13 @@ def _text_chunk(sections: List[SectionBlock]) -> List[Dict]:
         text_blocks = _split_by_max_size(paras, _MAX_CHUNK_CHARS)
 
         for text in text_blocks:
-            if len(text) < _MIN_CHUNK_CHARS:
+            if not _has_enough_content(text):
                 continue
+
+            content_hash = hashlib.sha256(text[:128].encode()).hexdigest()[:16]
+            if content_hash in seen_content:
+                continue
+            seen_content.add(content_hash)
 
             cid = hashlib.sha256(
                 f"{section.section_id}{chunk_idx}{text[:64]}".encode()
@@ -432,14 +585,17 @@ def _stream_embed_and_store(
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    enriched_texts: List[str] = []
     for i, chunk in enumerate(chunk_dicts):
         prefix = f"{chunk['section_title']} | "
         if i > 0:
             prev_last = _get_last_sentence(chunk_dicts[i - 1]["text"])
             if prev_last:
                 prefix += prev_last + " "
-        enriched_texts.append(prefix + chunk["text"])
+        chunk["text"] = prefix + chunk["text"]
+        chunk["char_count"] = len(chunk["text"])
+        chunk["word_count"] = len(chunk["text"].split())
+
+    enriched_texts = [c["text"] for c in chunk_dicts]
 
     batch_size = _EMBED_BATCH_SIZE
     batches = [
