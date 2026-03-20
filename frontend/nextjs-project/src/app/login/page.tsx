@@ -6,47 +6,20 @@ import { useRouter } from "next/navigation";
 
 function BackgroundGradient() {
   return (
-    <div
-      aria-hidden
-      style={{
-        position: "fixed",
-        inset: 0,
-        pointerEvents: "none",
-        zIndex: 0,
-        overflow: "hidden",
-      }}
-    >
-      <svg
-        viewBox="0 0 1200 900"
-        fill="none"
-        preserveAspectRatio="xMidYMid slice"
-        style={{ position: "absolute", width: "100%", height: "100%", top: "-10%", left: 0 }}
-      >
-        <defs>
-          <filter id="li_blur_a" x="-60%" y="-60%" width="220%" height="220%">
-            <feGaussianBlur stdDeviation="90" />
-          </filter>
-          <filter id="li_blur_b" x="-60%" y="-60%" width="220%" height="220%">
-            <feGaussianBlur stdDeviation="110" />
-          </filter>
-          <filter id="li_blur_c" x="-60%" y="-60%" width="220%" height="220%">
-            <feGaussianBlur stdDeviation="120" />
-          </filter>
-          <radialGradient id="li_radial_dark" cx="50%" cy="50%" r="50%">
-            <stop offset="0%" stopColor="#3F18BF" />
-            <stop offset="100%" stopColor="#141414" stopOpacity="0" />
-          </radialGradient>
-        </defs>
-        <g filter="url(#li_blur_c)">
-          <ellipse cx="600" cy="500" rx="420" ry="230" fill="url(#li_radial_dark)" />
-        </g>
-        <g filter="url(#li_blur_b)">
-          <ellipse cx="600" cy="340" rx="380" ry="210" fill="#7F57F9" fillOpacity="0.7" />
-        </g>
-        <g filter="url(#li_blur_a)">
-          <ellipse cx="600" cy="210" rx="320" ry="170" fill="#CDBCFF" fillOpacity="0.55" />
-        </g>
-      </svg>
+    <div aria-hidden style={{ position: "fixed", inset: 0, pointerEvents: "none", zIndex: 0 }}>
+      <div
+        style={{
+          position: "absolute",
+          top: "30%",
+          left: "50%",
+          transform: "translateX(-50%)",
+          width: 600,
+          height: 600,
+          borderRadius: "50%",
+          background: "radial-gradient(circle, rgba(255,255,255,0.03) 0%, transparent 70%)",
+          filter: "blur(40px)",
+        }}
+      />
     </div>
   );
 }
@@ -78,7 +51,7 @@ function InputField({
           letterSpacing: "0.08em",
           textTransform: "uppercase",
           color: "rgba(255,255,255,0.45)",
-          fontFamily: "inherit",
+          fontFamily: "var(--font-hero-mono)",
         }}
       >
         {label}
@@ -95,16 +68,16 @@ function InputField({
             width: "100%",
             background: "rgba(255,255,255,0.04)",
             border: focused
-              ? "1px solid rgba(127,87,249,0.7)"
+              ? "1px solid rgba(255,255,255,0.3)"
               : "1px solid rgba(255,255,255,0.1)",
-            borderRadius: "10px",
+            borderRadius: "6px",
             padding: isPassword ? "13px 44px 13px 16px" : "13px 16px",
             color: "white",
             fontSize: "0.92rem",
             fontFamily: "inherit",
             outline: "none",
             transition: "border-color 0.25s ease, box-shadow 0.25s ease",
-            boxShadow: focused ? "0 0 0 3px rgba(127,87,249,0.15)" : "none",
+            boxShadow: focused ? "0 0 0 3px rgba(255,255,255,0.06)" : "none",
             boxSizing: "border-box",
           }}
           autoComplete={isPassword ? "current-password" : "email"}
@@ -168,7 +141,7 @@ export default function LoginPage() {
       style={{
         minHeight: "100vh",
         width: "100%",
-        background: "#141414",
+        background: "#060609",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
@@ -214,12 +187,12 @@ export default function LoginPage() {
           zIndex: 10,
           width: "100%",
           maxWidth: "400px",
-          background: "rgba(21,25,41,0.75)",
+          background: "rgba(6,6,9,0.85)",
           backdropFilter: "blur(24px)",
           border: "1px solid rgba(255,255,255,0.08)",
-          borderRadius: "20px",
+          borderRadius: "12px",
           padding: "40px 36px",
-          boxShadow: "0 32px 80px rgba(0,0,0,0.5), 0 0 0 1px rgba(127,87,249,0.08)",
+          boxShadow: "0 32px 80px rgba(0,0,0,0.5)",
         }}
       >
         {/* Header */}
@@ -229,9 +202,10 @@ export default function LoginPage() {
               fontSize: "0.75rem",
               letterSpacing: "0.12em",
               textTransform: "uppercase",
-              color: "rgba(127,87,249,0.9)",
+              color: "rgba(255,255,255,0.4)",
               marginBottom: "10px",
               fontWeight: 400,
+              fontFamily: "var(--font-hero-mono)",
             }}
           >
             Welcome back
@@ -243,6 +217,7 @@ export default function LoginPage() {
               color: "white",
               lineHeight: 1.2,
               margin: 0,
+              fontFamily: "var(--font-hero-display)",
             }}
           >
             Sign in to MindSync
@@ -280,6 +255,7 @@ export default function LoginPage() {
                 fontSize: "0.82rem",
                 color: "rgba(255,255,255,0.4)",
                 userSelect: "none",
+                fontFamily: "var(--font-hero-mono)",
               }}
             >
               <div
@@ -289,9 +265,9 @@ export default function LoginPage() {
                   height: "16px",
                   borderRadius: "4px",
                   border: remember
-                    ? "1px solid rgba(127,87,249,0.8)"
+                    ? "1px solid rgba(255,255,255,0.5)"
                     : "1px solid rgba(255,255,255,0.2)",
-                  background: remember ? "rgba(127,87,249,0.25)" : "transparent",
+                  background: remember ? "rgba(255,255,255,0.1)" : "transparent",
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
@@ -301,7 +277,7 @@ export default function LoginPage() {
               >
                 {remember && (
                   <svg width="10" height="10" viewBox="0 0 12 12" fill="none">
-                    <path d="M2 6l3 3 5-5" stroke="rgba(205,188,255,0.9)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                    <path d="M2 6l3 3 5-5" stroke="rgba(255,255,255,0.8)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
                   </svg>
                 )}
               </div>
@@ -312,12 +288,12 @@ export default function LoginPage() {
               href="/forgot-password"
               style={{
                 fontSize: "0.82rem",
-                color: "rgba(205,188,255,0.7)",
+                color: "rgba(255,255,255,0.5)",
                 textDecoration: "none",
                 transition: "color 0.2s",
               }}
               onMouseEnter={(e) => (e.currentTarget.style.color = "white")}
-              onMouseLeave={(e) => (e.currentTarget.style.color = "rgba(205,188,255,0.7)")}
+              onMouseLeave={(e) => (e.currentTarget.style.color = "rgba(255,255,255,0.5)")}
             >
               Forgot password?
             </Link>
@@ -330,19 +306,17 @@ export default function LoginPage() {
             style={{
               marginTop: "4px",
               padding: "14px",
-              borderRadius: "10px",
-              background: loading
-                ? "rgba(115,82,221,0.5)"
-                : "linear-gradient(135deg, #7352DD 0%, #9187E0 100%)",
+              borderRadius: "6px",
+              background: loading ? "rgba(255,255,255,0.5)" : "#fff",
               border: "none",
-              color: "white",
+              color: "#060609",
               fontSize: "0.95rem",
               fontWeight: 600,
               fontFamily: "inherit",
               cursor: loading ? "not-allowed" : "pointer",
               letterSpacing: "0.02em",
               transition: "transform 0.2s ease, box-shadow 0.2s ease",
-              boxShadow: loading ? "none" : "0 4px 24px rgba(115,82,221,0.35)",
+              boxShadow: loading ? "none" : "0 4px 24px rgba(255,255,255,0.1)",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
@@ -351,19 +325,20 @@ export default function LoginPage() {
             onMouseEnter={(e) => {
               if (!loading) {
                 (e.currentTarget as HTMLButtonElement).style.transform = "translateY(-1px)";
-                (e.currentTarget as HTMLButtonElement).style.boxShadow = "0 8px 32px rgba(115,82,221,0.5)";
+                (e.currentTarget as HTMLButtonElement).style.boxShadow = "0 8px 32px rgba(255,255,255,0.15)";
               }
             }}
             onMouseLeave={(e) => {
-              (e.currentTarget as HTMLButtonElement).style.transform = "translateY(0)";
-              (e.currentTarget as HTMLButtonElement).style.boxShadow = "0 4px 24px rgba(115,82,221,0.35)";
+              const b = e.currentTarget as HTMLButtonElement;
+              b.style.transform = "translateY(0)";
+              b.style.boxShadow = loading ? "none" : "0 4px 24px rgba(255,255,255,0.1)";
             }}
           >
             {loading ? (
               <>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" style={{ animation: "spin 0.8s linear infinite" }}>
-                  <circle cx="12" cy="12" r="10" stroke="rgba(255,255,255,0.3)" strokeWidth="2" />
-                  <path d="M12 2a10 10 0 0 1 10 10" stroke="white" strokeWidth="2" strokeLinecap="round" />
+                  <circle cx="12" cy="12" r="10" stroke="rgba(6,6,9,0.2)" strokeWidth="2" />
+                  <path d="M12 2a10 10 0 0 1 10 10" stroke="#060609" strokeWidth="2" strokeLinecap="round" />
                 </svg>
                 Signing in…
               </>
@@ -386,13 +361,13 @@ export default function LoginPage() {
           <Link
             href="/signup"
             style={{
-              color: "rgba(205,188,255,0.85)",
+              color: "rgba(255,255,255,0.7)",
               textDecoration: "none",
               fontWeight: 600,
               transition: "color 0.2s",
             }}
             onMouseEnter={(e) => (e.currentTarget.style.color = "white")}
-            onMouseLeave={(e) => (e.currentTarget.style.color = "rgba(205,188,255,0.85)")}
+            onMouseLeave={(e) => (e.currentTarget.style.color = "rgba(255,255,255,0.7)")}
           >
             Create one
           </Link>
