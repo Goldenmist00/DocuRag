@@ -99,6 +99,51 @@ export async function uploadSource(
   return res.json();
 }
 
+/**
+ * Upload a file source with real-time upload progress via XMLHttpRequest.
+ * @param notebookId - Parent notebook UUID
+ * @param file - File to upload
+ * @param onProgress - Callback receiving upload percentage (0-100)
+ * @returns Created source record from server
+ */
+export function uploadSourceWithProgress(
+  notebookId: string,
+  file: File,
+  onProgress?: (percent: number) => void
+): Promise<SourceRecord> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const form = new FormData();
+    form.append("file", file);
+
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) {
+        onProgress(Math.round((e.loaded / e.total) * 100));
+      }
+    };
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve(JSON.parse(xhr.responseText));
+        } catch {
+          reject(new Error("Invalid response from server"));
+        }
+      } else {
+        reject(new Error(`Upload failed: ${xhr.status}`));
+      }
+    };
+
+    xhr.onerror = () => reject(new Error("Network error during upload"));
+
+    xhr.open(
+      "POST",
+      `${API_BASE}/notebooks/${notebookId}/sources/upload`
+    );
+    xhr.send(form);
+  });
+}
+
 export async function addTextSource(
   notebookId: string,
   name: string,
