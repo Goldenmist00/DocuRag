@@ -13,14 +13,18 @@ Optimisations:
     so the frontend can display meaningful progress.
 """
 
+import hashlib
+import json
 import logging
+import re
 from pathlib import Path
 from typing import Dict, List, Optional
+
+import numpy as np
 
 from src.db import source_db, chunk_db, notebook_db
 from src.pdf_processor import (
     SectionBlock,
-    chunk_sections,
     extract_pages,
     detect_sections,
 )
@@ -131,20 +135,24 @@ def add_text_source(notebook_id: str, name: str, text: str) -> Dict:
 
 
 _EMBED_BATCH_SIZE = 48
+_MAX_CHUNK_CHARS = 3000
+_MIN_CHUNK_CHARS = 80
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 
 
 def process_source(source_id: str) -> None:
     """
-    Run the full ingestion pipeline for a source with streamed embed→insert.
+    Run the optimised ingestion pipeline for a source.
 
-    Stages (each updates the source status for frontend polling):
-      1. extracting  — PDF / text extraction
-      2. chunking    — sentence-aware chunking
-      3. embedding X/Y — API batches, inserted into DB as they complete
-      4. ready       — all done
+    Stages:
+      1. extracting   — PDF / JSON / text extraction into sections
+      2. chunking     — text-based paragraph grouping (no API call)
+      3. embedding    — embed chunks with streamed DB inserts
+      4. ready        — all done
 
-    Runs inside a thread pool executor (see api.py), so multiple sources
-    are processed concurrently.
+    Uses text-based chunking instead of paragraph-level embedding
+    to eliminate a full round of NVIDIA API calls, and streams
+    embed batches directly into PostgreSQL as they return.
 
     Args:
         source_id: UUID of the source to process.
@@ -158,42 +166,30 @@ def process_source(source_id: str) -> None:
 
     try:
         _set_status(source_id, "extracting")
-        chunks = _extract_and_chunk(source)
+        sections = _extract_sections(source)
 
-        if not chunks:
+        if not sections:
+            source_db.update_source(source_id, status="ready", chunk_count=0)
+            logger.warning("Source %s produced 0 sections", source_id)
+            return
+
+        embedder = _get_embedder()
+
+        _set_status(source_id, "chunking")
+        chunk_dicts = _text_chunk(sections)
+
+        if not chunk_dicts:
             source_db.update_source(source_id, status="ready", chunk_count=0)
             logger.warning("Source %s produced 0 chunks", source_id)
             return
 
-        _set_status(source_id, "chunking")
-        chunk_dicts = [_chunk_to_dict(c) for c in chunks]
-        texts = [_chunk_text(c) for c in chunks]
-
-        embedder = _get_embedder()
-        total_batches = (len(texts) + _EMBED_BATCH_SIZE - 1) // _EMBED_BATCH_SIZE
-        inserted = 0
-
-        def _on_batch_done(done: int, total: int) -> None:
-            _set_status(source_id, f"embedding {done}/{total}")
-
-        _set_status(source_id, f"embedding 0/{total_batches}")
-
-        embeddings = embedder.embed_batch(
-            texts,
-            show_progress=False,
-            on_batch_done=_on_batch_done,
-        )
-
-        _set_status(source_id, "storing")
-        inserted = chunk_db.insert_chunks(
-            chunks=chunk_dicts,
-            embeddings=embeddings,
-            notebook_id=notebook_id,
-            source_id=source_id,
+        _set_status(source_id, "embedding")
+        inserted = _stream_embed_and_store(
+            chunk_dicts, embedder, notebook_id, source_id,
         )
 
         source_db.update_source(source_id, status="ready", chunk_count=inserted)
-        logger.info("Source %s ready — %d chunks embedded", source_id, inserted)
+        logger.info("Source %s ready — %d chunks stored", source_id, inserted)
 
     except Exception as exc:
         logger.error("Source %s processing failed: %s", source_id, exc, exc_info=True)
@@ -247,8 +243,30 @@ def delete_source(source_id: str) -> None:
 
 
 def _set_status(source_id: str, status: str) -> None:
-    """Update the source status column (used for granular progress tracking)."""
-    source_db.update_source(source_id, status=status)
+    """
+    Update the source status column with retry.
+
+    Status updates are non-critical progress signals — a transient
+    DB timeout should not kill the entire ingestion pipeline.
+
+    Args:
+        source_id: UUID string.
+        status: New status value.
+    """
+    import time as _time
+    for attempt in range(3):
+        try:
+            source_db.update_source(source_id, status=status)
+            return
+        except Exception as exc:
+            if attempt < 2:
+                logger.warning(
+                    "Status update to '%s' failed (attempt %d/3): %s — retrying",
+                    status, attempt + 1, exc,
+                )
+                _time.sleep(2 ** attempt)
+            else:
+                logger.error("Status update to '%s' failed after 3 attempts: %s", status, exc)
 
 
 def _validate_notebook(notebook_id: str) -> None:
@@ -257,41 +275,311 @@ def _validate_notebook(notebook_id: str) -> None:
         raise ValueError(f"Notebook not found: {notebook_id}")
 
 
-def _extract_and_chunk(source: Dict) -> list:
+def _extract_sections(source: Dict) -> List[SectionBlock]:
     """
-    Extract text from a source and produce chunks.
+    Extract text from a source and produce SectionBlock objects.
 
-    For PDFs: extract_pages -> detect_sections -> chunk_sections.
-    For text: wrap in a single SectionBlock -> chunk_sections.
+    For PDFs: extract_pages -> detect_sections.
+    For JSON: parse and flatten text content.
+    For text: wrap in a single SectionBlock.
 
     Args:
         source: Source dict from DB.
 
     Returns:
-        List of Chunk objects (from pdf_processor).
+        List of SectionBlock objects.
     """
     if source["source_type"] == "file":
         file_path = source.get("file_path", "")
         if not file_path or not Path(file_path).exists():
             raise FileNotFoundError(f"Source file not found: {file_path}")
 
+        ext = Path(file_path).suffix.lower()
+
+        if ext == ".json":
+            return _extract_json_sections(file_path, source.get("name", "JSON file"))
+
         pages = extract_pages(file_path)
-        sections = detect_sections(pages)
-        return chunk_sections(sections)
+        return detect_sections(pages)
 
     text = source.get("raw_content", "")
     if not text:
         return []
 
-    section = SectionBlock(
+    return [SectionBlock(
         chapter_id="0",
         section_id="0.0",
         section_title=source.get("name", "Pasted text"),
         page_start=1,
         page_end=1,
         text=text,
+    )]
+
+
+def _split_paragraphs(text: str) -> List[str]:
+    """Split text into paragraphs on double-newlines, falling back to single."""
+    paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    if not paras and text.strip():
+        paras = [p.strip() for p in text.split("\n") if p.strip()]
+    if not paras and text.strip():
+        paras = [text.strip()]
+    return paras
+
+
+def _get_last_sentence(text: str) -> str:
+    """Return the last complete sentence from a text block."""
+    sentences = [s.strip() for s in _SENTENCE_SPLIT_RE.split(text.strip()) if s.strip()]
+    return sentences[-1] if sentences else ""
+
+
+def _split_by_max_size(paragraphs: List[str], max_chars: int) -> List[str]:
+    """
+    Group paragraphs into text blocks that stay under max_chars.
+
+    Args:
+        paragraphs: List of paragraph strings.
+        max_chars: Maximum characters per group.
+
+    Returns:
+        List of combined text blocks.
+    """
+    result: List[str] = []
+    current: List[str] = []
+    current_len = 0
+
+    for para in paragraphs:
+        para_len = len(para) + 2
+        if current_len + para_len > max_chars and current:
+            result.append("\n\n".join(current))
+            current = []
+            current_len = 0
+        current.append(para)
+        current_len += para_len
+
+    if current:
+        result.append("\n\n".join(current))
+    return result
+
+
+def _text_chunk(sections: List[SectionBlock]) -> List[Dict]:
+    """
+    Fast text-based chunking using paragraph grouping by size.
+
+    Groups paragraphs within each section up to _MAX_CHUNK_CHARS,
+    respecting section boundaries. No API calls — purely local.
+
+    Args:
+        sections: List of SectionBlock objects from extraction.
+
+    Returns:
+        List of chunk dicts ready for embedding.
+    """
+    chunk_dicts: List[Dict] = []
+    chunk_idx = 0
+
+    for section in sections:
+        paras = _split_paragraphs(section.text)
+        if not paras:
+            continue
+
+        text_blocks = _split_by_max_size(paras, _MAX_CHUNK_CHARS)
+
+        for text in text_blocks:
+            if len(text) < _MIN_CHUNK_CHARS:
+                continue
+
+            cid = hashlib.sha256(
+                f"{section.section_id}{chunk_idx}{text[:64]}".encode()
+            ).hexdigest()[:16]
+
+            chunk_dicts.append({
+                "chunk_id": cid,
+                "text": text,
+                "section_id": section.section_id,
+                "chapter_id": section.chapter_id,
+                "section_title": section.section_title,
+                "page_num": section.page_start,
+                "chunk_index": chunk_idx,
+                "char_count": len(text),
+                "word_count": len(text.split()),
+            })
+            chunk_idx += 1
+
+    logger.info("Text chunking produced %d chunks from %d sections", len(chunk_dicts), len(sections))
+    return chunk_dicts
+
+
+def _stream_embed_and_store(
+    chunk_dicts: List[Dict],
+    embedder: Embedder,
+    notebook_id: str,
+    source_id: str,
+) -> int:
+    """
+    Embed chunks and insert into DB in a streamed fashion.
+
+    Each NVIDIA API batch is inserted into PostgreSQL as soon as
+    its embeddings return, overlapping network and DB latency.
+
+    Args:
+        chunk_dicts: List of chunk dicts from _text_chunk.
+        embedder: Configured Embedder instance.
+        notebook_id: Parent notebook UUID.
+        source_id: Parent source UUID.
+
+    Returns:
+        Total rows inserted.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    enriched_texts: List[str] = []
+    for i, chunk in enumerate(chunk_dicts):
+        prefix = f"{chunk['section_title']} | "
+        if i > 0:
+            prev_last = _get_last_sentence(chunk_dicts[i - 1]["text"])
+            if prev_last:
+                prefix += prev_last + " "
+        enriched_texts.append(prefix + chunk["text"])
+
+    batch_size = _EMBED_BATCH_SIZE
+    batches = [
+        (enriched_texts[i:i + batch_size], chunk_dicts[i:i + batch_size], idx)
+        for idx, i in enumerate(range(0, len(enriched_texts), batch_size))
+    ]
+    n_batches = len(batches)
+    inserted = 0
+
+    def _embed_one(texts: List[str]) -> np.ndarray:
+        return embedder.embed_batch(texts, show_progress=False, use_cache=True)
+
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="db-store") as db_pool:
+        db_futures = []
+
+        for batch_texts, batch_chunks, b_idx in batches:
+            embs = _embed_one(batch_texts)
+            _set_status(source_id, f"embedding {b_idx + 1}/{n_batches}")
+
+            fut = db_pool.submit(
+                chunk_db.insert_chunks,
+                chunks=batch_chunks,
+                embeddings=embs,
+                notebook_id=notebook_id,
+                source_id=source_id,
+            )
+            db_futures.append(fut)
+
+        for fut in as_completed(db_futures):
+            inserted += fut.result()
+
+    logger.info(
+        "Streamed embed+store: %d chunks in %d batches (source=%s)",
+        inserted, n_batches, source_id,
     )
-    return chunk_sections([section])
+    return inserted
+
+
+def _flatten_json_strings(obj, prefix: str = "") -> List[str]:
+    """
+    Recursively extract all string values from a JSON structure.
+
+    Objects produce "key: value" lines, arrays are iterated in order.
+    Non-string scalars (numbers, booleans, None) are stringified.
+
+    Args:
+        obj: Parsed JSON value (dict, list, or scalar).
+        prefix: Dot-delimited path for context (e.g. "user.address").
+
+    Returns:
+        Flat list of human-readable text lines.
+    """
+    lines: List[str] = []
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            child_prefix = f"{prefix}.{key}" if prefix else key
+            if isinstance(value, str):
+                lines.append(f"{child_prefix}: {value}")
+            elif isinstance(value, (dict, list)):
+                lines.extend(_flatten_json_strings(value, child_prefix))
+            elif value is not None:
+                lines.append(f"{child_prefix}: {value}")
+    elif isinstance(obj, list):
+        for i, item in enumerate(obj):
+            lines.extend(_flatten_json_strings(item, f"{prefix}[{i}]"))
+    elif isinstance(obj, str):
+        lines.append(f"{prefix}: {obj}" if prefix else obj)
+    elif obj is not None:
+        lines.append(f"{prefix}: {obj}" if prefix else str(obj))
+    return lines
+
+
+_JSON_BATCH_TARGET = 600
+
+
+def _extract_json_sections(file_path: str, source_name: str) -> List[SectionBlock]:
+    """
+    Parse a JSON file and produce SectionBlock(s) for chunking.
+
+    If the top-level value is an array, items are batched into sections
+    of ~600 chars each so short entries don't fall below the minimum
+    chunk threshold. Single objects are flattened into one section.
+
+    Args:
+        file_path: Path to the JSON file on disk.
+        source_name: Display name for the source.
+
+    Returns:
+        List of SectionBlock objects.
+
+    Raises:
+        ValueError: If the file cannot be parsed as JSON.
+    """
+    try:
+        raw = Path(file_path).read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError(f"Invalid JSON file ({source_name}): {exc}") from exc
+
+    sections: List[SectionBlock] = []
+
+    if isinstance(data, list):
+        batch_lines: List[str] = []
+        batch_len = 0
+        batch_idx = 0
+
+        for idx, item in enumerate(data):
+            lines = _flatten_json_strings(item)
+            if not lines:
+                continue
+            entry_text = "\n".join(lines)
+            batch_lines.append(entry_text)
+            batch_len += len(entry_text)
+
+            if batch_len >= _JSON_BATCH_TARGET or idx == len(data) - 1:
+                sections.append(SectionBlock(
+                    chapter_id="0",
+                    section_id=f"0.{batch_idx}",
+                    section_title=f"{source_name} — part {batch_idx + 1}",
+                    page_start=1,
+                    page_end=1,
+                    text="\n\n".join(batch_lines),
+                ))
+                batch_lines = []
+                batch_len = 0
+                batch_idx += 1
+    else:
+        lines = _flatten_json_strings(data)
+        if lines:
+            sections.append(SectionBlock(
+                chapter_id="0",
+                section_id="0.0",
+                section_title=source_name,
+                page_start=1,
+                page_end=1,
+                text="\n".join(lines),
+            ))
+
+    logger.info("JSON source '%s' produced %d sections", source_name, len(sections))
+    return sections
 
 
 def _chunk_text(chunk) -> str:
