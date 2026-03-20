@@ -25,4 +25,4 @@ RUN mkdir -p data/raw data/processed embeddings/cache outputs logs uploads
 ENV PYTHONUNBUFFERED=1
 
 # Default command
-CMD ["python", "scripts/run_pipeline.py", "--help"]
+CMD ["uvicorn", "src.api:app", "--host", "0.0.0.0", "--port", "8000"]
