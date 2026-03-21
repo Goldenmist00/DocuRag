@@ -234,6 +234,10 @@ def _add_keyword_overlap_edges(
     they don't share named entities. Catches topically related chunks
     that discuss the same concepts with different terminology.
 
+    Uses an inverted keyword index (keyword -> chunk_ids) instead of
+    O(N^2) pairwise comparison. Candidate pairs are discovered via the
+    index, then exact overlap is computed only for those candidates.
+
     Args:
         chunk_dicts:    Full list of chunk dicts.
         chunk_keywords: Pre-computed keyword sets per chunk.
@@ -242,29 +246,42 @@ def _add_keyword_overlap_edges(
         notebook_id:    Parent notebook UUID.
         min_overlap:    Minimum shared keywords to create an edge.
     """
-    chunk_ids = [c["chunk_id"] for c in chunk_dicts]
+    kw_index: Dict[str, List[str]] = defaultdict(list)
+    for c in chunk_dicts:
+        cid = c["chunk_id"]
+        for kw in chunk_keywords.get(cid, set()):
+            kw_index[kw].append(cid)
 
-    for i, cid_a in enumerate(chunk_ids):
-        kw_a = chunk_keywords.get(cid_a, set())
-        if not kw_a:
+    candidate_counts: Counter = Counter()
+    for kw, cids in kw_index.items():
+        if len(cids) < 2 or len(cids) > 100:
+            continue
+        for i, cid_a in enumerate(cids):
+            for cid_b in cids[i + 1:]:
+                pair = (min(cid_a, cid_b), max(cid_a, cid_b))
+                candidate_counts[pair] += 1
+
+    for pair, shared_count in candidate_counts.items():
+        if shared_count < min_overlap:
+            continue
+        if pair in seen_pairs:
             continue
 
-        for cid_b in chunk_ids[i + 1:]:
-            pair = (min(cid_a, cid_b), max(cid_a, cid_b))
-            if pair in seen_pairs:
-                continue
+        kw_a = chunk_keywords.get(pair[0], set())
+        kw_b = chunk_keywords.get(pair[1], set())
+        overlap_kws = kw_a & kw_b
+        overlap = len(overlap_kws)
 
-            kw_b = chunk_keywords.get(cid_b, set())
-            overlap = len(kw_a & kw_b)
+        if overlap < min_overlap:
+            continue
 
-            if overlap >= min_overlap:
-                seen_pairs.add(pair)
-                weight = min(1.0, overlap / 15.0)
-                edges.append({
-                    "source_chunk_id": pair[0],
-                    "target_chunk_id": pair[1],
-                    "relation_type": "keyword_overlap",
-                    "entity": ", ".join(sorted(kw_a & kw_b)[:5]),
-                    "weight": round(weight, 3),
-                    "notebook_id": notebook_id,
-                })
+        seen_pairs.add(pair)
+        weight = min(1.0, overlap / 15.0)
+        edges.append({
+            "source_chunk_id": pair[0],
+            "target_chunk_id": pair[1],
+            "relation_type": "keyword_overlap",
+            "entity": ", ".join(sorted(overlap_kws)[:5]),
+            "weight": round(weight, 3),
+            "notebook_id": notebook_id,
+        })

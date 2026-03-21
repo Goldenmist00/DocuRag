@@ -228,15 +228,37 @@ def _detect_repeated_lines(
     return {line for line, count in line_page_count.items() if count >= min_count}
 
 
+_last_raw_char_count: int = 0
+
+
+def get_last_raw_char_count() -> int:
+    """
+    Return the raw character count captured during the most recent
+    ``extract_pages`` call.
+
+    This avoids re-opening the PDF a second time just to compute
+    coverage statistics.
+
+    Returns:
+        Total raw characters across all pages from the last extraction.
+    """
+    return _last_raw_char_count
+
+
 def extract_pages(pdf_path: str) -> List[PageRecord]:
     """
     PDF text extraction with multi-column fix and header/footer stripping.
 
+    Also captures raw character counts (via simple ``get_text``) in the
+    same ``fitz.open()`` call so callers can retrieve them with
+    ``get_last_raw_char_count()`` without re-opening the PDF.
+
     Pipeline:
       1. Extract text using block-level bounding boxes (fixes column order).
-      2. Detect repeated edge lines across pages (headers/footers/watermarks).
-      3. Strip detected repeated lines from each page.
-      4. Clean remaining artifacts via ``_clean_text``.
+      2. Capture raw text lengths for coverage validation (same open).
+      3. Detect repeated edge lines across pages (headers/footers/watermarks).
+      4. Strip detected repeated lines from each page.
+      5. Clean remaining artifacts via ``_clean_text``.
 
     Args:
         pdf_path: Path to PDF file.
@@ -248,28 +270,40 @@ def extract_pages(pdf_path: str) -> List[PageRecord]:
         FileNotFoundError: If PDF file doesn't exist.
         RuntimeError: If PDF extraction fails.
     """
+    global _last_raw_char_count
+    _last_raw_char_count = 0
+
     pdf_path = Path(pdf_path)
     if not pdf_path.exists():
         raise FileNotFoundError(f"PDF not found: {pdf_path}")
 
     raw_texts: List[str] = []
+    raw_total_chars = 0
     try:
         with fitz.open(str(pdf_path)) as doc:
             total_pages = len(doc)
             logger.info("Extracting %d pages from PDF...", total_pages)
 
             for page_idx in range(total_pages):
+                page = doc[page_idx]
                 try:
-                    raw_texts.append(_extract_page_blocks_sorted(doc[page_idx]))
+                    raw_total_chars += len(page.get_text("text"))
+                except Exception:
+                    pass
+
+                try:
+                    raw_texts.append(_extract_page_blocks_sorted(page))
                 except Exception:
                     try:
-                        raw_texts.append(doc[page_idx].get_text("text"))
+                        raw_texts.append(page.get_text("text"))
                     except Exception as e:
                         logger.warning("Failed to extract page %d: %s", page_idx + 1, e)
                         raw_texts.append("")
 
     except Exception as e:
         raise RuntimeError(f"PDF extraction failed: {e}") from e
+
+    _last_raw_char_count = raw_total_chars
 
     repeated = _detect_repeated_lines(raw_texts)
     if repeated:
