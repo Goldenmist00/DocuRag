@@ -639,7 +639,7 @@ class PgVectorStore:
             ORDER BY source_id, score DESC
         """
 
-        params = (vec, *extra_params, vec, per_source_k)
+        params = (vec, vec, *extra_params, per_source_k)
 
         try:
             with self._connection() as conn:
