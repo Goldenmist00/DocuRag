@@ -30,6 +30,7 @@ from src.pdf_processor import (
     SectionBlock,
     extract_pages,
     detect_sections,
+    get_last_raw_char_count,
 )
 from src.chunker import chunk_sections_unified
 from src.embedder import Embedder, EmbeddingTier
@@ -452,15 +453,7 @@ def _extract_sections(source: Dict) -> Tuple[List[SectionBlock], Dict]:
         coverage["pages_total"] = len(pages)
         coverage["extracted_chars"] = sum(len(p.text) for p in pages)
         coverage["pages_empty"] = sum(1 for p in pages if len(p.text.strip()) < 10)
-
-        import fitz
-        try:
-            with fitz.open(file_path) as doc:
-                coverage["raw_chars"] = sum(
-                    len(doc[i].get_text("text")) for i in range(len(doc))
-                )
-        except Exception:
-            coverage["raw_chars"] = coverage["extracted_chars"]
+        coverage["raw_chars"] = get_last_raw_char_count() or coverage["extracted_chars"]
 
         sections = detect_sections(pages)
         coverage["section_chars"] = sum(len(s.text) for s in sections)
@@ -494,13 +487,18 @@ def _stream_embed_and_store(
     source_id: str,
 ) -> int:
     """
-    Embed chunks and insert into DB in a streamed fashion.
+    Embed all chunks in one call (leveraging the embedder's internal
+    12-worker thread pool for parallel NVIDIA API requests), then
+    pipeline DB inserts concurrently.
 
-    Each NVIDIA API batch is inserted into PostgreSQL as soon as
-    its embeddings return, overlapping network and DB latency.
-
-    Contextual enrichment (section title, chapter context) is already
-    applied by the unified chunker, so the text is embedded as-is.
+    This is significantly faster than the old approach of embedding
+    one 48-chunk batch at a time sequentially, because:
+      - ``embed_batch`` internally splits into 48-text API batches
+        and fires them across 12 parallel workers.
+      - DB inserts happen concurrently in a separate thread pool
+        while embedding completes.
+      - Status updates are throttled to every 5th batch instead
+        of every single batch.
 
     Args:
         chunk_dicts: List of chunk dicts from chunk_sections_unified.
@@ -514,41 +512,53 @@ def _stream_embed_and_store(
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     texts = [c["text"] for c in chunk_dicts]
+    n_total = len(texts)
+    db_batch_size = _EMBED_BATCH_SIZE
 
-    batch_size = _EMBED_BATCH_SIZE
-    batches = [
-        (texts[i:i + batch_size], chunk_dicts[i:i + batch_size], idx)
-        for idx, i in enumerate(range(0, len(texts), batch_size))
+    _set_status(source_id, f"embedding 0/{n_total} chunks")
+
+    def _on_batch_done(done: int, total: int) -> None:
+        """Throttled progress callback — updates status every 5 batches."""
+        if done == total or done % 5 == 0:
+            _set_status(
+                source_id,
+                f"embedding {min(done * db_batch_size, n_total)}/{n_total} chunks",
+            )
+
+    all_embeddings = embedder.embed_batch(
+        texts,
+        show_progress=False,
+        use_cache=True,
+        on_batch_done=_on_batch_done,
+    )
+
+    _set_status(source_id, "storing")
+
+    db_batches = [
+        (chunk_dicts[i:i + db_batch_size], all_embeddings[i:i + db_batch_size])
+        for i in range(0, n_total, db_batch_size)
     ]
-    n_batches = len(batches)
+
     inserted = 0
 
-    def _embed_one(batch_texts: List[str]) -> np.ndarray:
-        """Embed a single batch of texts."""
-        return embedder.embed_batch(batch_texts, show_progress=False, use_cache=True)
-
-    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="db-store") as db_pool:
-        db_futures = []
-
-        for batch_texts, batch_chunks, b_idx in batches:
-            embs = _embed_one(batch_texts)
-            _set_status(source_id, f"embedding {b_idx + 1}/{n_batches}")
-
-            fut = db_pool.submit(
+    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="db-store") as db_pool:
+        futures = [
+            db_pool.submit(
                 chunk_db.insert_chunks,
                 chunks=batch_chunks,
-                embeddings=embs,
+                embeddings=batch_embs,
                 notebook_id=notebook_id,
                 source_id=source_id,
             )
-            db_futures.append(fut)
+            for batch_chunks, batch_embs in db_batches
+        ]
 
-        for fut in as_completed(db_futures):
+        for fut in as_completed(futures):
             inserted += fut.result()
 
     logger.info(
-        "Streamed embed+store: %d chunks in %d batches (source=%s)",
-        inserted, n_batches, source_id,
+        "Embed+store: %d chunks (%d batches, source=%s)",
+        inserted, len(db_batches), source_id,
     )
     return inserted
 
