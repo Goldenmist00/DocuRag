@@ -15,7 +15,9 @@ Both providers use requests + SSE streaming.
 import json
 import logging
 import os
+import random
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
@@ -25,6 +27,9 @@ import requests
 from src.retriever import RetrievedChunk
 
 logger = logging.getLogger(__name__)
+
+_LLM_SEMAPHORE = threading.Semaphore(2)
+_LLM_LAST_CALL = threading.local()
 
 NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
@@ -97,7 +102,7 @@ class Generator:
         max_tokens: int = 1024,
         top_p: float = 0.9,
         api_key: Optional[str] = None,
-        max_retries: int = 2,
+        max_retries: int = 5,
     ):
         self.temperature = temperature
         self.max_tokens = max_tokens
@@ -270,12 +275,28 @@ class Generator:
         return payload
 
     def _call_api(self, user_prompt: str) -> str:
-        """Try primary provider; fall back to Groq if NVIDIA fails."""
+        """
+        Call the primary LLM provider with global concurrency control.
+
+        Uses a semaphore to limit concurrent API calls across all threads,
+        preventing rate-limit storms during batch processing. Falls back
+        to Groq if NVIDIA exhausts retries.
+
+        Args:
+            user_prompt: Fully formatted prompt string.
+
+        Returns:
+            Generated answer text.
+
+        Raises:
+            RuntimeError: If all providers fail after retries.
+        """
         payload = self._build_payload(user_prompt)
-        delay   = 1.0
+        delay   = 1.5
         last_error: Optional[Exception] = None
 
         for attempt in range(1, self.max_retries + 1):
+            _LLM_SEMAPHORE.acquire()
             try:
                 response = requests.post(
                     self._url,
@@ -284,14 +305,11 @@ class Generator:
                     timeout=120,
                 )
                 response.raise_for_status()
-                result = self._parse_stream(response)
-                # Add delay after successful request to avoid rate limits
-                time.sleep(0.5)
-                return result
+                return self._parse_stream(response)
             except requests.exceptions.HTTPError as exc:
-                # Handle rate limit errors (429) with longer backoff
                 if exc.response.status_code == 429:
-                    backoff = delay * 3  # Longer wait for rate limits
+                    jitter = random.uniform(0, 1.5)
+                    backoff = delay * 2 + jitter
                     logger.warning(
                         "%s rate limit hit (attempt %d/%d) — waiting %.1fs",
                         self._provider, attempt, self.max_retries, backoff,
@@ -304,13 +322,20 @@ class Generator:
                     raise
             except Exception as exc:
                 last_error = exc
-                status = getattr(getattr(exc, "response", None), "status_code", None)
-                wait = delay
-                if status == 429:
-                    retry_after = getattr(getattr(exc, "response", None), "headers", {}).get("Retry-After")
+                status_code = getattr(
+                    getattr(exc, "response", None), "status_code", None,
+                )
+                if status_code == 429:
+                    retry_after = getattr(
+                        getattr(exc, "response", None), "headers", {},
+                    ).get("Retry-After")
                     wait = float(retry_after) if retry_after else 15.0
-                    logger.warning("%s 429 rate limit — waiting %.0fs", self._provider, wait)
+                    logger.warning(
+                        "%s 429 rate limit — waiting %.0fs",
+                        self._provider, wait,
+                    )
                 else:
+                    wait = delay + random.uniform(0, 1.0)
                     logger.warning(
                         "%s attempt %d/%d failed: %s",
                         self._provider, attempt, self.max_retries, exc,
@@ -318,11 +343,13 @@ class Generator:
                 if attempt < self.max_retries:
                     time.sleep(wait)
                     delay *= 2
+            finally:
+                _LLM_SEMAPHORE.release()
 
-        # Runtime fallback to Groq if NVIDIA was primary and Groq is available
         if self._provider == "nvidia" and self._groq_headers:
             logger.warning("NVIDIA failed — falling back to Groq for this query")
             groq_payload = self._build_payload(user_prompt, provider="groq")
+            _LLM_SEMAPHORE.acquire()
             try:
                 response = requests.post(
                     GROQ_URL,
@@ -336,9 +363,12 @@ class Generator:
                 raise RuntimeError(
                     f"Both NVIDIA and Groq failed. Last error: {exc}"
                 ) from exc
+            finally:
+                _LLM_SEMAPHORE.release()
 
         raise RuntimeError(
-            f"{self._provider} API failed after {self.max_retries} attempts: {last_error}"
+            f"{self._provider} API failed after {self.max_retries} attempts: "
+            f"{last_error}"
         ) from last_error
 
     def _parse_stream(self, response: requests.Response) -> str:

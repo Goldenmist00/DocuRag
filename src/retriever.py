@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
@@ -149,6 +149,7 @@ class Retriever:
         notebook_id: Optional[str] = None,
         max_hops: int = 1,
         expansion_k: int = 3,
+        query_vec: Optional[np.ndarray] = None,
     ) -> List[RetrievedChunk]:
         """
         Multi-hop retrieval: source-aware search + graph edge expansion.
@@ -165,12 +166,16 @@ class Retriever:
             notebook_id:  If provided, restrict to this notebook.
             max_hops:     Number of graph traversal hops (default 1).
             expansion_k:  Max neighbor chunks to add per hop.
+            query_vec:    Pre-computed embedding; skips re-embedding if
+                          provided (used by batch processing).
 
         Returns:
             List of RetrievedChunk ordered by combined score.
         """
         k = top_k if top_k is not None else self.top_k
-        query_vec = self.embedder.embed(query)
+
+        if query_vec is None:
+            query_vec = self.embedder.embed(query)
 
         if notebook_id:
             hop0 = self._per_source_retrieve(query_vec, k, notebook_id, query)
@@ -188,7 +193,8 @@ class Retriever:
             )
             return hop0
 
-        source_name_map = self._build_source_name_map(notebook_id)
+        sources = source_db.list_sources(notebook_id)
+        source_name_map = {s["id"]: s.get("name", "") for s in sources}
 
         seen_ids = {c.chunk_id for c in hop0}
         all_chunks = list(hop0)
@@ -379,19 +385,20 @@ class Retriever:
         target_source_id = self._detect_source_mention(query, ready)
 
         per_k = max(MIN_PER_SOURCE_K, top_k)
+        name_map = {s["id"]: s.get("name", "") for s in ready}
+        source_ids = [s["id"] for s in ready]
+
+        raw_by_source = self.vector_store.search_multi_source(
+            query_vec,
+            source_ids=source_ids,
+            per_source_k=per_k,
+            notebook_id=notebook_id,
+        )
 
         by_source: Dict[str, List[RetrievedChunk]] = {}
-        for src in ready:
-            raw = self.vector_store.search(
-                query_vec, top_k=per_k,
-                notebook_id=notebook_id, source_id=src["id"],
-            )
-            name = src.get("name", "")
-            src_key = src["id"]
-            chunks = []
-            for row in raw:
-                c = self._to_chunk(row, source_name=name)
-                chunks.append(c)
+        for src_key, rows in raw_by_source.items():
+            name = name_map.get(src_key, "")
+            chunks = [self._to_chunk(row, source_name=name) for row in rows]
             if chunks:
                 by_source[src_key] = chunks
 
