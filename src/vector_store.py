@@ -569,6 +569,115 @@ class PgVectorStore:
         except Exception as exc:
             raise RuntimeError(f"search failed: {exc}") from exc
 
+    def search_multi_source(
+        self,
+        query_embedding: np.ndarray,
+        source_ids: List[str],
+        per_source_k: int = 10,
+        notebook_id: Optional[str] = None,
+        probes: int = 10,
+    ) -> Dict[str, List[Dict]]:
+        """
+        Retrieve top-k chunks per source in a single SQL round-trip.
+
+        Uses ``ROW_NUMBER() OVER (PARTITION BY source_id ...)`` to fetch
+        the best chunks for each source in one query, avoiding N separate
+        queries when the notebook has N sources.
+
+        Args:
+            query_embedding: 1-D float array of shape ``(embedding_dim,)``.
+            source_ids:      List of source UUIDs to search.
+            per_source_k:    Max chunks to return per source.
+            notebook_id:     If provided, restrict to this notebook.
+            probes:          IVFFlat search probes.
+
+        Returns:
+            Dict mapping source_id → list of result dicts (same schema as
+            ``search``), each list sorted by score descending.
+        """
+        if not source_ids:
+            return {}
+
+        t0 = time.time()
+        vec = query_embedding.tolist()
+        needs_halfvec = self.embedding_dim > 2000
+
+        conditions: list = []
+        extra_params: list = []
+
+        placeholders = ",".join(["%s"] * len(source_ids))
+        conditions.append(f"source_id IN ({placeholders})")
+        extra_params.extend(source_ids)
+
+        if notebook_id:
+            conditions.append("notebook_id = %s")
+            extra_params.append(notebook_id)
+
+        where_clause = "WHERE " + " AND ".join(conditions)
+
+        if needs_halfvec:
+            score_expr = f"1 - (embedding <=> %s::halfvec({self.embedding_dim}))"
+            order_expr = f"embedding <=> %s::halfvec({self.embedding_dim})"
+        else:
+            score_expr = "1 - (embedding <=> %s::vector)"
+            order_expr = "embedding <=> %s::vector"
+
+        sql = f"""
+            SELECT * FROM (
+                SELECT
+                    chunk_id, text, section_id, chapter_id,
+                    section_title, page_num, chunk_index,
+                    char_count, word_count, source_id,
+                    {score_expr} AS score,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY source_id ORDER BY {order_expr}
+                    ) AS rn
+                FROM {self.table_name}
+                {where_clause}
+            ) ranked
+            WHERE rn <= %s
+            ORDER BY source_id, score DESC
+        """
+
+        params = (vec, *extra_params, vec, per_source_k)
+
+        try:
+            with self._connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SET LOCAL statement_timeout = '45s'")
+                    if not needs_halfvec:
+                        cur.execute(f"SET ivfflat.probes = {probes}")
+                    cur.execute(sql, params)
+
+                    by_source: Dict[str, List[Dict]] = {}
+                    for row in cur.fetchall():
+                        result = {
+                            "chunk_id":      row[0],
+                            "text":          row[1],
+                            "section_id":    row[2],
+                            "chapter_id":    row[3],
+                            "section_title": row[4],
+                            "page_num":      row[5],
+                            "chunk_index":   row[6],
+                            "char_count":    row[7],
+                            "word_count":    row[8],
+                            "source_id":     str(row[9]) if row[9] else None,
+                            "score":         float(row[10]),
+                        }
+                        sid = result["source_id"] or ""
+                        by_source.setdefault(sid, []).append(result)
+
+            elapsed = (time.time() - t0) * 1000
+            total_rows = sum(len(v) for v in by_source.values())
+            logger.info(
+                "✓ Multi-source search: %d results across %d sources in %.1fms",
+                total_rows, len(by_source), elapsed,
+            )
+            return by_source
+
+        except Exception as exc:
+            raise RuntimeError(f"search_multi_source failed: {exc}") from exc
+
     def get_stats(self) -> Dict:
         """
         Return summary statistics about the stored chunks.

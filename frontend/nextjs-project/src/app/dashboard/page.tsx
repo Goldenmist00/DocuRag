@@ -29,6 +29,7 @@ import {
   type PodcastRecord,
   type AnswerGrade,
   type BatchQueryResult,
+  type BatchQueryResponse,
 } from "@/lib/api";
 import { useToast } from "@/components/ui/toast";
 
@@ -448,13 +449,14 @@ function MarkdownMessage({ text }: { text: string }) {
 }
 
 /* ─── Chat area ─── */
-function ChatArea({ isNew, notebookId, onUploadFiles }: { isNew: boolean; notebookId: string | null; onUploadFiles?: (files: File[]) => void }) {
+function ChatArea({ isNew, notebookId, onUploadFiles, onBatchResults }: { isNew: boolean; notebookId: string | null; onUploadFiles?: (files: File[]) => void; onBatchResults?: (results: BatchQueryResponse) => void }) {
   const [messages, setMessages] = useState<Message[]>(EMPTY_MESSAGES);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [draggingOver, setDraggingOver] = useState(false);
   const [droppedFiles, setDroppedFiles] = useState<string[]>([]);
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
+  const [lastBatchResults, setLastBatchResults] = useState<BatchQueryResponse | null>(null);
   const chatFileRef = useRef<HTMLInputElement>(null);
   const attachRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -478,6 +480,44 @@ function ChatArea({ isNew, notebookId, onUploadFiles }: { isNew: boolean; notebo
       pages: Array.from(pages).sort((a, b) => a - b),
     }));
   };
+
+  /**
+   * Export batch query results to a CSV file and trigger download.
+   * Escapes fields containing commas, quotes, or newlines per RFC 4180.
+   */
+  const exportBatchToCsv = useCallback(() => {
+    if (!lastBatchResults) return;
+    const escCsv = (val: string) => {
+      if (/[",\n\r]/.test(val)) return `"${val.replace(/"/g, '""')}"`;
+      return val;
+    };
+
+    const header = "Question,Answer,Status,Sources,Latency (ms)";
+    const rows = lastBatchResults.results.map(r => {
+      const answer = r.answer
+        ? escCsv(r.answer.replace(/\n/g, " "))
+        : "";
+      const st = r.error ? "Failed" : "Answered";
+      const sources = r.sources?.length
+        ? escCsv(r.sources.map(s => s.source_name || s.citation).join("; "))
+        : "";
+      return `${escCsv(r.question)},${answer},${st},${sources},${r.latency_ms}`;
+    });
+
+    const csv = [header, ...rows].join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `batch_answers_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.style.display = "none";
+    document.body.appendChild(a);
+    setTimeout(() => {
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 0);
+  }, [lastBatchResults]);
 
   /**
    * Handles attaching PDF/JSON files from the inline attachment button.
@@ -558,6 +598,8 @@ function ChatArea({ isNew, notebookId, onUploadFiles }: { isNew: boolean; notebo
 
         for (const qFile of questionFiles) {
           const batch = await batchQueryFromFile(notebookId, qFile, 10);
+          setLastBatchResults(batch);
+          onBatchResults?.(batch);
 
           const summaryMsg: Message = {
             id: Date.now() + 2,
@@ -875,6 +917,33 @@ function ChatArea({ isNew, notebookId, onUploadFiles }: { isNew: boolean; notebo
               )}
             </div>
           ))}
+          {lastBatchResults && !loading && (
+            <div style={{ display: "flex", justifyContent: "center", marginTop: 4 }}>
+              <button
+                onClick={exportBatchToCsv}
+                className="action-btn"
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  padding: "7px 16px",
+                  borderRadius: 8,
+                  border: "1px solid rgba(91,138,240,0.25)",
+                  background: "rgba(91,138,240,0.08)",
+                  color: "rgba(140,175,255,0.9)",
+                  fontSize: "0.76rem",
+                  fontFamily: "inherit",
+                  cursor: "pointer",
+                  transition: "background 0.15s, border-color 0.15s",
+                }}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" style={{ flexShrink: 0 }}>
+                  <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+                Export answers to CSV
+              </button>
+            </div>
+          )}
           {loading && (
             <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
               <img src="/Group 39.svg" alt="MindSync" style={{ width: 22, height: 22, borderRadius: "50%", objectFit: "cover" }} />
@@ -2490,6 +2559,7 @@ function DashboardInner() {
   const [title, setTitle] = useState(isNew ? "Untitled notebook" : "Loading…");
   const [shareText, setShareText] = useState("Share");
   const [showExport, setShowExport] = useState(false);
+  const [headerBatchResults, setHeaderBatchResults] = useState<BatchQueryResponse | null>(null);
   const [showUploadModal, setShowUploadModal] = useState(false);
   const [studioView, setStudioView] = useState<StudioView>("home");
   const [studioFullscreen, setStudioFullscreen] = useState(false);
@@ -2651,6 +2721,37 @@ function DashboardInner() {
     setShareText("Copied!");
     setTimeout(() => setShareText("Share"), 2000);
   };
+
+  const handleExportCsv = useCallback(() => {
+    if (!headerBatchResults) return;
+    const escCsv = (val: string) => {
+      if (/[",\n\r]/.test(val)) return `"${val.replace(/"/g, '""')}"`;
+      return val;
+    };
+    const header = "Question,Answer,Status,Sources,Latency (ms)";
+    const rows = headerBatchResults.results.map(r => {
+      const answer = r.answer ? escCsv(r.answer.replace(/\n/g, " ")) : "";
+      const st = r.error ? "Failed" : "Answered";
+      const sources = r.sources?.length
+        ? escCsv(r.sources.map(s => s.source_name || s.citation).join("; "))
+        : "";
+      return `${escCsv(r.question)},${answer},${st},${sources},${r.latency_ms}`;
+    });
+    const csv = [header, ...rows].join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `batch_answers_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.style.display = "none";
+    document.body.appendChild(a);
+    setTimeout(() => {
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 0);
+    setShowExport(false);
+  }, [headerBatchResults]);
 
   const handleExport = (format: string) => {
     let base64 = "";
@@ -2839,6 +2940,33 @@ function DashboardInner() {
                   <Icon d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8zM14 2v6h6" size={12} />
                   Download DOCX
                 </button>
+                {headerBatchResults && (
+                  <>
+                    <div style={{ height: 1, background: "rgba(255,255,255,0.08)", margin: "4px 0" }} />
+                    <button
+                      onClick={handleExportCsv}
+                      className="dropdown-item"
+                      style={{
+                        padding: "8px 10px",
+                        background: "transparent",
+                        border: "none",
+                        color: "rgba(140,175,255,0.9)",
+                        fontSize: "0.78rem",
+                        textAlign: "left",
+                        cursor: "pointer",
+                        borderRadius: 8,
+                        fontFamily: "inherit",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                        transition: "background 0.15s, color 0.15s"
+                      }}
+                    >
+                      <Icon d={["M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4", "M7 10l5 5 5-5", "M12 15V3"]} size={12} />
+                      Download CSV (Batch Answers)
+                    </button>
+                  </>
+                )}
               </div>
             )}
           </div>
@@ -2855,7 +2983,7 @@ function DashboardInner() {
         </div>
         {/* Chat box */}
         <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0, border: "1px solid #1f1f1f", borderRadius: 10, background: "#0a0a0a" }}>
-          <ChatArea isNew={isNew} notebookId={notebookId} onUploadFiles={handleUploadFiles} />
+          <ChatArea isNew={isNew} notebookId={notebookId} onUploadFiles={handleUploadFiles} onBatchResults={setHeaderBatchResults} />
         </div>
         {/* Studio box */}
         <div style={{ display: "contents" }}>
