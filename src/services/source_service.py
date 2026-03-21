@@ -7,10 +7,12 @@ This is the core pipeline that makes per-notebook RAG work.
 Processing runs concurrently in a thread pool via asyncio.run_in_executor.
 
 Optimisations:
-  - Streamed embed→insert: each API batch is inserted into the DB as soon
+  - Streamed embed->insert: each API batch is inserted into the DB as soon
     as its embeddings return, overlapping network + DB latency.
   - Granular progress: status column is updated at every pipeline stage
     so the frontend can display meaningful progress.
+  - Unified chunker: recursive hierarchical splitting with abbreviation-safe
+    sentence boundaries, quality filtering, overlap, and contextual enrichment.
 """
 
 import hashlib
@@ -21,6 +23,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+import yaml
 
 from src.db import source_db, chunk_db, notebook_db, chunk_graph_db
 from src.pdf_processor import (
@@ -28,6 +31,7 @@ from src.pdf_processor import (
     extract_pages,
     detect_sections,
 )
+from src.chunker import chunk_sections_unified
 from src.embedder import Embedder, EmbeddingTier
 from src.services.entity_extractor import build_graph_edges
 
@@ -37,6 +41,35 @@ UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 _embedder: Optional[Embedder] = None
+
+
+def _load_chunk_config() -> Dict:
+    """
+    Load chunking parameters from config.yaml, falling back to defaults.
+
+    Returns:
+        Dict with chunk_size, chunk_overlap, min_chunk_size, min_letter_ratio,
+        and cross_section_overlap.
+    """
+    defaults = {
+        "chunk_size": 800,
+        "chunk_overlap": 100,
+        "min_chunk_size": 150,
+        "min_letter_ratio": 0.4,
+        "cross_section_overlap": 100,
+    }
+    try:
+        cfg_path = Path("config.yaml")
+        if cfg_path.exists():
+            with open(cfg_path) as f:
+                cfg = yaml.safe_load(f) or {}
+            chunk_cfg = cfg.get("chunking", {})
+            for key in defaults:
+                if key in chunk_cfg:
+                    defaults[key] = chunk_cfg[key]
+    except Exception as exc:
+        logger.warning("Failed to load config.yaml for chunking: %s", exc)
+    return defaults
 
 
 def _get_embedder() -> Embedder:
@@ -136,10 +169,6 @@ def add_text_source(notebook_id: str, name: str, text: str) -> Dict:
 
 
 _EMBED_BATCH_SIZE = 48
-_MAX_CHUNK_CHARS = 3000
-_MIN_CHUNK_CHARS = 150
-_MIN_LETTER_RATIO = 0.4
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 
 
 _COVERAGE_WARN_THRESHOLD = 0.55
@@ -257,7 +286,17 @@ def process_source(source_id: str) -> None:
         embedder = _get_embedder()
 
         _set_status(source_id, "chunking")
-        chunk_dicts = _text_chunk(sections)
+        cfg = _load_chunk_config()
+        chunk_dicts = chunk_sections_unified(
+            sections,
+            chunk_size=cfg["chunk_size"],
+            chunk_overlap=cfg["chunk_overlap"],
+            min_chunk=cfg["min_chunk_size"],
+            min_letter_ratio=cfg["min_letter_ratio"],
+            cross_section_overlap=cfg["cross_section_overlap"],
+            enrich_context=True,
+            dedup=True,
+        )
 
         if not chunk_dicts:
             source_db.update_source(source_id, status="ready", chunk_count=0)
@@ -446,124 +485,6 @@ def _extract_sections(source: Dict) -> Tuple[List[SectionBlock], Dict]:
     return sections, coverage
 
 
-def _split_paragraphs(text: str) -> List[str]:
-    """Split text into paragraphs on double-newlines, falling back to single."""
-    paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
-    if not paras and text.strip():
-        paras = [p.strip() for p in text.split("\n") if p.strip()]
-    if not paras and text.strip():
-        paras = [text.strip()]
-    return paras
-
-
-def _get_last_sentence(text: str) -> str:
-    """Return the last complete sentence from a text block."""
-    sentences = [s.strip() for s in _SENTENCE_SPLIT_RE.split(text.strip()) if s.strip()]
-    return sentences[-1] if sentences else ""
-
-
-def _split_by_max_size(paragraphs: List[str], max_chars: int) -> List[str]:
-    """
-    Group paragraphs into text blocks that stay under max_chars.
-
-    Args:
-        paragraphs: List of paragraph strings.
-        max_chars: Maximum characters per group.
-
-    Returns:
-        List of combined text blocks.
-    """
-    result: List[str] = []
-    current: List[str] = []
-    current_len = 0
-
-    for para in paragraphs:
-        para_len = len(para) + 2
-        if current_len + para_len > max_chars and current:
-            result.append("\n\n".join(current))
-            current = []
-            current_len = 0
-        current.append(para)
-        current_len += para_len
-
-    if current:
-        result.append("\n\n".join(current))
-    return result
-
-
-def _has_enough_content(text: str) -> bool:
-    """
-    Check that a chunk has enough alphabetic content to produce a
-    meaningful embedding vector.
-
-    Rejects chunks that are mostly numbers, symbols, or list markers.
-
-    Args:
-        text: Candidate chunk text.
-
-    Returns:
-        True if the chunk is worth embedding.
-    """
-    if len(text) < _MIN_CHUNK_CHARS:
-        return False
-    alpha = sum(1 for c in text if c.isalpha())
-    return (alpha / len(text)) >= _MIN_LETTER_RATIO
-
-
-def _text_chunk(sections: List[SectionBlock]) -> List[Dict]:
-    """
-    Fast text-based chunking with quality filtering.
-
-    Groups paragraphs within each section up to _MAX_CHUNK_CHARS,
-    respecting section boundaries. Filters out chunks that are too
-    short or lack meaningful text content. Deduplicates across
-    sections by content hash to catch pull quotes / repeated blocks.
-
-    Args:
-        sections: List of SectionBlock objects from extraction.
-
-    Returns:
-        List of chunk dicts ready for embedding.
-    """
-    chunk_dicts: List[Dict] = []
-    chunk_idx = 0
-    seen_content: set = set()
-
-    for section in sections:
-        paras = _split_paragraphs(section.text)
-        if not paras:
-            continue
-
-        text_blocks = _split_by_max_size(paras, _MAX_CHUNK_CHARS)
-
-        for text in text_blocks:
-            if not _has_enough_content(text):
-                continue
-
-            content_hash = hashlib.sha256(text[:128].encode()).hexdigest()[:16]
-            if content_hash in seen_content:
-                continue
-            seen_content.add(content_hash)
-
-            cid = hashlib.sha256(
-                f"{section.section_id}{chunk_idx}{text[:64]}".encode()
-            ).hexdigest()[:16]
-
-            chunk_dicts.append({
-                "chunk_id": cid,
-                "text": text,
-                "section_id": section.section_id,
-                "chapter_id": section.chapter_id,
-                "section_title": section.section_title,
-                "page_num": section.page_start,
-                "chunk_index": chunk_idx,
-                "char_count": len(text),
-                "word_count": len(text.split()),
-            })
-            chunk_idx += 1
-
-    logger.info("Text chunking produced %d chunks from %d sections", len(chunk_dicts), len(sections))
-    return chunk_dicts
 
 
 def _stream_embed_and_store(
@@ -578,8 +499,11 @@ def _stream_embed_and_store(
     Each NVIDIA API batch is inserted into PostgreSQL as soon as
     its embeddings return, overlapping network and DB latency.
 
+    Contextual enrichment (section title, chapter context) is already
+    applied by the unified chunker, so the text is embedded as-is.
+
     Args:
-        chunk_dicts: List of chunk dicts from _text_chunk.
+        chunk_dicts: List of chunk dicts from chunk_sections_unified.
         embedder: Configured Embedder instance.
         notebook_id: Parent notebook UUID.
         source_id: Parent source UUID.
@@ -589,28 +513,19 @@ def _stream_embed_and_store(
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    for i, chunk in enumerate(chunk_dicts):
-        prefix = f"{chunk['section_title']} | "
-        if i > 0:
-            prev_last = _get_last_sentence(chunk_dicts[i - 1]["text"])
-            if prev_last:
-                prefix += prev_last + " "
-        chunk["text"] = prefix + chunk["text"]
-        chunk["char_count"] = len(chunk["text"])
-        chunk["word_count"] = len(chunk["text"].split())
-
-    enriched_texts = [c["text"] for c in chunk_dicts]
+    texts = [c["text"] for c in chunk_dicts]
 
     batch_size = _EMBED_BATCH_SIZE
     batches = [
-        (enriched_texts[i:i + batch_size], chunk_dicts[i:i + batch_size], idx)
-        for idx, i in enumerate(range(0, len(enriched_texts), batch_size))
+        (texts[i:i + batch_size], chunk_dicts[i:i + batch_size], idx)
+        for idx, i in enumerate(range(0, len(texts), batch_size))
     ]
     n_batches = len(batches)
     inserted = 0
 
-    def _embed_one(texts: List[str]) -> np.ndarray:
-        return embedder.embed_batch(texts, show_progress=False, use_cache=True)
+    def _embed_one(batch_texts: List[str]) -> np.ndarray:
+        """Embed a single batch of texts."""
+        return embedder.embed_batch(batch_texts, show_progress=False, use_cache=True)
 
     with ThreadPoolExecutor(max_workers=2, thread_name_prefix="db-store") as db_pool:
         db_futures = []
