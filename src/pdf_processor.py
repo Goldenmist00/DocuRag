@@ -25,6 +25,16 @@ from pydantic import BaseModel, Field, ConfigDict
 
 import fitz  # PyMuPDF
 
+from src.chunker import (
+    chunk_section_text,
+    has_enough_content,
+    enrich_chunk_text,
+    DEFAULT_CHUNK_SIZE as _CHUNKER_DEFAULT_SIZE,
+    DEFAULT_CHUNK_OVERLAP as _CHUNKER_DEFAULT_OVERLAP,
+    DEFAULT_MIN_CHUNK as _CHUNKER_DEFAULT_MIN,
+    DEFAULT_MIN_LETTER_RATIO,
+)
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -45,6 +55,14 @@ class SectionBlock(BaseModel):
     page_start: int
     page_end: int
     text: str
+    page_breaks: List[Tuple[int, int]] = Field(
+        default_factory=list,
+        description=(
+            "Character offsets within ``text`` where page transitions occur. "
+            "Each tuple is (char_offset, page_number). Enables per-chunk "
+            "page attribution instead of section-level page_start/page_end."
+        ),
+    )
 
 
 class Chunk(BaseModel):
@@ -61,7 +79,6 @@ class Chunk(BaseModel):
     section_title: str
     page_start: int
     page_end: int
-    # stored as chunk_index in DB — alias keeps JSONL backward-compatible
     chunk_index: int = Field(0, alias="chunk_index_in_section")
     char_count: int
     word_count: int
@@ -76,20 +93,13 @@ class Chunk(BaseModel):
 # Constants & Regex
 # ---------------------------------------------------------------------------
 
-DEFAULT_CHUNK_SIZE    = 2000
-DEFAULT_CHUNK_OVERLAP = 200
-DEFAULT_MIN_CHUNK     = 150
+DEFAULT_CHUNK_SIZE    = _CHUNKER_DEFAULT_SIZE
+DEFAULT_CHUNK_OVERLAP = _CHUNKER_DEFAULT_OVERLAP
+DEFAULT_MIN_CHUNK     = _CHUNKER_DEFAULT_MIN
 
-# Regex for Chapters: "Chapter 1 Introduction"
 _CHAPTER_RE = re.compile(r"^\s*Chapter\s+(\d+)", re.MULTILINE | re.IGNORECASE)
-
-# Regex for Sections: "1.1 What Is Psychology?"
 _SECTION_RE = re.compile(r"^\s*(\d{1,2}\.\d{1,2})\s+(.+)", re.MULTILINE)
 
-# Sentence boundary
-_SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+")
-
-# Artifacts to strip (OpenStax specific)
 _ARTIFACTS_RE = [
     re.compile(r"OpenStax Psychology 2e", re.IGNORECASE),
     re.compile(r"Access for free at openstax.org", re.IGNORECASE),
@@ -98,7 +108,6 @@ _ARTIFACTS_RE = [
 _DEHYPHEN_RE = re.compile(r"(\w)-\n(\w)")
 _INLINE_PAGE_NUM_RE = re.compile(r"^\s*\d{1,4}\s*$", re.MULTILINE)
 
-# Non-content structural patterns to strip
 _STRUCTURAL_NOISE_RE = [
     re.compile(r"^\s*(?:Figure|Table|Chart)\s+\d+[\.\:]?\s*$", re.MULTILINE | re.IGNORECASE),
     re.compile(r"^\s*(?:Source|Note|Notes)\s*:\s*$", re.MULTILINE | re.IGNORECASE),
@@ -309,6 +318,42 @@ def _is_toc_page(text: str) -> bool:
     return toc_hits >= 3 and toc_hits / total_lines > 0.3
 
 
+def _extract_page_breaks(
+    offset_to_page: List[int],
+    global_start: int,
+    global_end: int,
+) -> List[Tuple[int, int]]:
+    """
+    Extract page transition points within a section's span of
+    the concatenated text, expressed as local character offsets.
+
+    Args:
+        offset_to_page: Global char-offset -> page-number mapping.
+        global_start: Start offset of this section in global text.
+        global_end: End offset of this section in global text.
+
+    Returns:
+        List of (local_char_offset, page_number) tuples marking where
+        the page changes within the section text.
+    """
+    breaks: List[Tuple[int, int]] = []
+    safe_end = min(global_end, len(offset_to_page))
+    if global_start >= safe_end:
+        return breaks
+
+    prev_page = offset_to_page[global_start]
+    breaks.append((0, prev_page))
+
+    for g_off in range(global_start + 1, safe_end):
+        cur_page = offset_to_page[g_off]
+        if cur_page != prev_page:
+            local_off = g_off - global_start
+            breaks.append((local_off, cur_page))
+            prev_page = cur_page
+
+    return breaks
+
+
 def detect_sections(pages: List[PageRecord]) -> List[SectionBlock]:
     """
     Detect Chapter/Section hierarchy for better citation anchoring.
@@ -317,12 +362,15 @@ def detect_sections(pages: List[PageRecord]) -> List[SectionBlock]:
       - Skips pages detected as Table of Contents.
       - Tags appendix/glossary/index sections with distinct chapter_id
         so they can be filtered or down-weighted at retrieval time.
+      - Populates per-section page_breaks for accurate per-chunk
+        page attribution.
 
     Args:
         pages: List of PageRecord objects.
 
     Returns:
-        List of SectionBlock objects with hierarchical metadata.
+        List of SectionBlock objects with hierarchical metadata
+        and page_breaks for per-chunk page tracking.
     """
     if not pages:
         logger.warning("No pages provided for section detection")
@@ -370,9 +418,11 @@ def detect_sections(pages: List[PageRecord]) -> List[SectionBlock]:
     markers.sort(key=lambda x: x["offset"])
 
     if not markers:
+        pb = _extract_page_breaks(offset_to_page, 0, len(full_text))
         return [SectionBlock(
             chapter_id="0", section_id="0.0", section_title="Full Text",
-            page_start=1, page_end=filtered_pages[-1].page_number, text=full_text
+            page_start=1, page_end=filtered_pages[-1].page_number,
+            text=full_text, page_breaks=pb,
         )]
 
     blocks: List[SectionBlock] = []
@@ -385,6 +435,7 @@ def detect_sections(pages: List[PageRecord]) -> List[SectionBlock]:
         if preface_text:
             p_start = offset_to_page[0]
             p_end = offset_to_page[min(first_offset, len(offset_to_page) - 1)]
+            pb = _extract_page_breaks(offset_to_page, 0, first_offset)
             blocks.append(SectionBlock(
                 chapter_id="0",
                 section_id="0.0",
@@ -392,6 +443,7 @@ def detect_sections(pages: List[PageRecord]) -> List[SectionBlock]:
                 page_start=p_start,
                 page_end=p_end,
                 text=preface_text,
+                page_breaks=pb,
             ))
             logger.info("Captured %d chars of pre-chapter text as Preface", len(preface_text))
 
@@ -399,6 +451,7 @@ def detect_sections(pages: List[PageRecord]) -> List[SectionBlock]:
         start = marker["offset"]
         end = markers[i+1]["offset"] if i+1 < len(markers) else len(full_text)
         text = full_text[start:end].strip()
+        pb = _extract_page_breaks(offset_to_page, start, end)
 
         match = marker["match"]
 
@@ -416,6 +469,7 @@ def detect_sections(pages: List[PageRecord]) -> List[SectionBlock]:
                 page_start=p_start,
                 page_end=p_end,
                 text=text,
+                page_breaks=pb,
             ))
             continue
 
@@ -434,6 +488,7 @@ def detect_sections(pages: List[PageRecord]) -> List[SectionBlock]:
                     page_start=p_start,
                     page_end=p_end,
                     text=text,
+                    page_breaks=pb,
                 ))
             continue
 
@@ -450,6 +505,7 @@ def detect_sections(pages: List[PageRecord]) -> List[SectionBlock]:
             page_start=p_start,
             page_end=p_end,
             text=text,
+            page_breaks=pb,
         ))
 
     return blocks
@@ -459,76 +515,103 @@ def detect_sections(pages: List[PageRecord]) -> List[SectionBlock]:
 # Chunking & Persistence
 # ---------------------------------------------------------------------------
 
+def _page_for_offset(page_breaks: List[Tuple[int, int]], offset: int) -> int:
+    """
+    Look up the page number for a character offset using page_breaks.
+
+    Uses binary-style scan: the page is the one whose break entry
+    has the largest local_offset <= ``offset``.
+
+    Args:
+        page_breaks: Sorted list of (local_char_offset, page_number).
+        offset: Character offset within the section text.
+
+    Returns:
+        Page number for that offset.
+    """
+    page = page_breaks[0][1] if page_breaks else 1
+    for brk_offset, brk_page in page_breaks:
+        if brk_offset <= offset:
+            page = brk_page
+        else:
+            break
+    return page
+
+
 def _chunk_single_section(
     args: Tuple,
 ) -> List[Chunk]:
     """
-    Chunk one SectionBlock into overlapping Chunk objects.
-    Module-level so ThreadPoolExecutor can use it.
+    Chunk one SectionBlock using recursive hierarchical splitting
+    with abbreviation-safe sentence boundaries, quality filtering,
+    and per-chunk page attribution via page_breaks.
+
+    Module-level function so ThreadPoolExecutor can pickle it.
 
     Args:
-        args: (section, chunk_size, chunk_overlap, min_chunk)
+        args: (section, chunk_size, chunk_overlap, min_chunk, min_letter_ratio)
 
     Returns:
         List of Chunk objects for this section.
     """
-    section, chunk_size, chunk_overlap, min_chunk = args
-    sentences = [s.strip() for s in _SENTENCE_END_RE.split(section.text) if s.strip()]
+    section = args[0]
+    chunk_size = args[1]
+    chunk_overlap = args[2]
+    min_chunk = args[3]
+    min_letter_ratio = args[4] if len(args) > 4 else DEFAULT_MIN_LETTER_RATIO
+
+    raw_texts = chunk_section_text(
+        section.text,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        min_chunk=min_chunk,
+        min_letter_ratio=min_letter_ratio,
+    )
+
+    page_breaks = getattr(section, "page_breaks", [])
+    has_page_breaks = bool(page_breaks)
 
     chunks: List[Chunk] = []
-    current_chunk_sentences: List[str] = []
-    current_len = 0
-    idx = 0
+    seen_hashes: set = set()
+    search_start = 0
 
-    for sentence in sentences:
-        s_len = len(sentence) + 1
-        if current_len + s_len > chunk_size and current_chunk_sentences:
-            chunk_text = " ".join(current_chunk_sentences)
-            if len(chunk_text) >= min_chunk:
-                cid = hashlib.sha256(
-                    f"{section.section_id}{idx}{chunk_text[:32]}".encode()
-                ).hexdigest()[:16]
-                chunks.append(Chunk(
-                    chunk_id=cid, raw_text=chunk_text,
-                    section_id=section.section_id, chapter_id=section.chapter_id,
-                    section_title=section.section_title,
-                    page_start=section.page_start, page_end=section.page_end,
-                    chunk_index_in_section=idx, char_count=len(chunk_text),
-                    word_count=len(chunk_text.split()),
-                ))
-                idx += 1
+    for idx, chunk_text in enumerate(raw_texts):
+        content_hash = hashlib.sha256(
+            chunk_text[:128].encode()
+        ).hexdigest()[:16]
+        if content_hash in seen_hashes:
+            continue
+        seen_hashes.add(content_hash)
 
-            # Overlap: keep last N sentences up to overlap budget
-            overlap_sentences: List[str] = []
-            overlap_len = 0
-            for sent in reversed(current_chunk_sentences):
-                sent_len = len(sent) + 1
-                if overlap_len + sent_len <= chunk_overlap:
-                    overlap_sentences.insert(0, sent)
-                    overlap_len += sent_len
-                else:
-                    break
-            current_chunk_sentences = overlap_sentences
-            current_len = overlap_len
+        if has_page_breaks:
+            chunk_start_in_section = section.text.find(chunk_text[:80], search_start)
+            if chunk_start_in_section < 0:
+                chunk_start_in_section = search_start
+            chunk_end_in_section = chunk_start_in_section + len(chunk_text)
+            search_start = max(search_start, chunk_start_in_section + 1)
 
-        current_chunk_sentences.append(sentence)
-        current_len += s_len
+            p_start = _page_for_offset(page_breaks, chunk_start_in_section)
+            p_end = _page_for_offset(page_breaks, chunk_end_in_section)
+        else:
+            p_start = section.page_start
+            p_end = section.page_end
 
-    # Final chunk
-    if current_chunk_sentences:
-        chunk_text = " ".join(current_chunk_sentences)
-        if len(chunk_text) >= min_chunk:
-            cid = hashlib.sha256(
-                f"{section.section_id}{idx}{chunk_text[:32]}".encode()
-            ).hexdigest()[:16]
-            chunks.append(Chunk(
-                chunk_id=cid, raw_text=chunk_text,
-                section_id=section.section_id, chapter_id=section.chapter_id,
-                section_title=section.section_title,
-                page_start=section.page_start, page_end=section.page_end,
-                chunk_index_in_section=idx, char_count=len(chunk_text),
-                word_count=len(chunk_text.split()),
-            ))
+        cid = hashlib.sha256(
+            f"{section.section_id}{idx}{chunk_text[:64]}".encode()
+        ).hexdigest()[:16]
+
+        chunks.append(Chunk(
+            chunk_id=cid,
+            raw_text=chunk_text,
+            section_id=section.section_id,
+            chapter_id=section.chapter_id,
+            section_title=section.section_title,
+            page_start=p_start,
+            page_end=p_end,
+            chunk_index_in_section=idx,
+            char_count=len(chunk_text),
+            word_count=len(chunk_text.split()),
+        ))
 
     return chunks
 
@@ -540,8 +623,9 @@ def chunk_sections(
     min_chunk: int = DEFAULT_MIN_CHUNK,
 ) -> List[Chunk]:
     """
-    Produce overlapping chunks with sentence-boundary awareness.
-    Parallelized across sections using ThreadPoolExecutor.
+    Produce overlapping chunks with recursive hierarchical splitting,
+    abbreviation-safe sentence boundaries, quality filtering, and
+    content-hash deduplication. Parallelized across sections.
 
     Args:
         sections:      List of SectionBlock objects.
@@ -561,14 +645,16 @@ def chunk_sections(
         len(sections), chunk_size, chunk_overlap,
     )
 
-    args = [(s, chunk_size, chunk_overlap, min_chunk) for s in sections]
+    args = [
+        (s, chunk_size, chunk_overlap, min_chunk, DEFAULT_MIN_LETTER_RATIO)
+        for s in sections
+    ]
 
-    # ThreadPoolExecutor (Windows-compatible, avoids spawn overhead)
     with ThreadPoolExecutor() as executor:
         results = list(executor.map(_chunk_single_section, args))
 
     all_chunks = [chunk for section_chunks in results for chunk in section_chunks]
-    logger.info("✓ Produced %d chunks from %d sections", len(all_chunks), len(sections))
+    logger.info("Produced %d chunks from %d sections", len(all_chunks), len(sections))
     return all_chunks
 
 
