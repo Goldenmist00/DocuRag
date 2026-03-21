@@ -262,8 +262,13 @@ export default function BooksPage() {
   }, []);
 
   const handleSignOut = async () => {
-    await authClient.signOut();
-    router.push('/');
+    try {
+      await authClient.signOut();
+    } catch {
+      // ignore errors — clear session regardless
+    }
+    // Hard redirect to clear any cached state
+    window.location.href = '/';
   };
 
   const { success: toastSuccess, error: toastError } = useToast();
