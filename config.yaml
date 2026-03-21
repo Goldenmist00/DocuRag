@@ -4,11 +4,13 @@
 pdf:
   input_path: "data/raw/openstax_psychology_2e.pdf"
 
-# Text Chunking
+# Text Chunking (unified: used by both batch ingestion and web-upload paths)
 chunking:
-  chunk_size: 800        # ~150-200 words; sweet spot for dense academic text
-  chunk_overlap: 100     # 100-char overlap preserves cross-boundary context
-  min_chunk_size: 150    # discard captions / stray headers shorter than this
+  chunk_size: 800              # ~150-200 words; sweet spot for dense academic text
+  chunk_overlap: 100           # 100-char overlap preserves cross-boundary context
+  min_chunk_size: 150          # discard captions / stray headers shorter than this
+  min_letter_ratio: 0.4        # reject chunks with <40% alphabetic characters
+  cross_section_overlap: 100   # chars of trailing context carried across sections
 
 # Embedding — NVIDIA API (baai/bge-m3, 1024d)
 embedding:
