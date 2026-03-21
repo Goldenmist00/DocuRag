@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { listNotebooks, createNotebook, deleteNotebook, updateNotebookTitle, type Notebook } from '@/lib/api';
 import { useToast } from '@/components/ui/toast';
+import { authClient } from '@/lib/auth/client';
 
 type Book = {
   id: string; title: string; date: string; sources: number;
@@ -227,6 +228,8 @@ export default function BooksPage() {
   const [creating, setCreating] = useState(false);
   const [opening, setOpening]   = useState(false);
   const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [user, setUser] = useState<{ name?: string; email?: string; image?: string } | null>(null);
 
   const SORT_OPTIONS: { key: typeof sort; label: string }[] = [
     { key: 'recent',  label: 'Most recent' },
@@ -251,6 +254,22 @@ export default function BooksPage() {
   }, []);
 
   useEffect(() => { fetchBooks(); }, [fetchBooks]);
+
+  useEffect(() => {
+    authClient.getSession().then(({ data }) => {
+      if (data?.user) setUser(data.user);
+    });
+  }, []);
+
+  const handleSignOut = async () => {
+    try {
+      await authClient.signOut();
+    } catch {
+      // ignore errors — clear session regardless
+    }
+    // Hard redirect to clear any cached state
+    window.location.href = '/';
+  };
 
   const { success: toastSuccess, error: toastError } = useToast();
 
@@ -312,7 +331,7 @@ export default function BooksPage() {
   return (
     <div
       style={{ minHeight: '100vh', background: '#000', color: '#fff', fontFamily: "var(--font-inria), 'Inria Sans', sans-serif" }}
-      onClick={() => { setOpenMenu(null); setSortOpen(false); }}
+      onClick={() => { setOpenMenu(null); setSortOpen(false); setUserMenuOpen(false); }}
     >
       <LoadingOverlay visible={creating} mode="create" />
       <LoadingOverlay visible={opening} mode="open" />
@@ -323,7 +342,41 @@ export default function BooksPage() {
             <img src="/logo.png" alt="MindSync" style={{ height: 70, width: 154, objectFit: 'contain', flexShrink: 0 }} />
           </div>
         </Link>
-        <div style={{ width: 32, height: 32, borderRadius: '50%', background: '#1a1a1a', border: '1px solid #2a2a2a', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.7)', cursor: 'pointer' }}>U</div>
+        <div style={{ position: 'relative' }}>
+          <div
+            onClick={(e) => { e.stopPropagation(); setUserMenuOpen(o => !o); }}
+            style={{ width: 32, height: 32, borderRadius: '50%', background: '#1a1a1a', border: '1px solid #2a2a2a', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.7)', cursor: 'pointer', overflow: 'hidden' }}
+          >
+            {user?.image
+              ? <img src={user.image} alt={user.name ?? 'User'} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+              : (user?.name?.[0] ?? user?.email?.[0] ?? 'U').toUpperCase()
+            }
+          </div>
+          {userMenuOpen && (
+            <div
+              onClick={e => e.stopPropagation()}
+              style={{ position: 'absolute', top: 40, right: 0, background: '#111', border: '1px solid #222', borderRadius: 8, minWidth: 200, boxShadow: '0 8px 32px rgba(0,0,0,0.6)', zIndex: 100, overflow: 'hidden' }}
+            >
+              {user && (
+                <div style={{ padding: '12px 14px', borderBottom: '1px solid #1f1f1f' }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: '#fff', marginBottom: 2 }}>{user.name ?? 'User'}</div>
+                  <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>{user.email}</div>
+                </div>
+              )}
+              <button
+                onClick={handleSignOut}
+                style={{ width: '100%', padding: '10px 14px', background: 'none', border: 'none', color: '#ff6b6b', fontSize: 13, fontFamily: 'inherit', cursor: 'pointer', textAlign: 'left', display: 'flex', alignItems: 'center', gap: 8, transition: 'background 0.15s' }}
+                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,107,107,0.08)')}
+                onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>
+                </svg>
+                Sign out
+              </button>
+            </div>
+          )}
+        </div>
       </header>
 
       {/* Toolbar */}
