@@ -31,6 +31,7 @@ import {
   type BatchQueryResult,
 } from "@/lib/api";
 import { useToast } from "@/components/ui/toast";
+import { authClient } from "@/lib/auth/client";
 
 /* ─── Client-side extended source type ─── */
 interface ClientSource extends SourceRecord {
@@ -2489,10 +2490,11 @@ function DashboardInner() {
   const isNew = !notebookId || searchParams.get("new") === "1";
   const [title, setTitle] = useState(isNew ? "Untitled notebook" : "Loading…");
   const [shareText, setShareText] = useState("Share");
-  const [showExport, setShowExport] = useState(false);
   const [showUploadModal, setShowUploadModal] = useState(false);
+  const [showExport, setShowExport] = useState(false);
   const [studioView, setStudioView] = useState<StudioView>("home");
   const [studioFullscreen, setStudioFullscreen] = useState(false);
+  const [user, setUser] = useState<{ name?: string; email?: string; image?: string } | null>(null);
   const { success: toastSuccess, error: toastError } = useToast();
 
   /* ─── Lifted sources state ─── */
@@ -2646,6 +2648,13 @@ function DashboardInner() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // Fetch user session
+  useEffect(() => {
+    authClient.getSession().then(({ data }) => {
+      if (data?.user) setUser(data.user);
+    });
+  }, []);
+
   const handleShare = () => {
     navigator.clipboard.writeText(window.location.href);
     setShareText("Copied!");
@@ -2752,98 +2761,12 @@ function DashboardInner() {
             {shareText}
           </button>
 
-          {/* Export Dropdown */}
-          <div style={{ position: "relative" }} onClick={(e) => e.stopPropagation()}>
-            <button 
-              onClick={() => setShowExport(!showExport)}
-              className="action-btn" 
-              style={{ 
-                padding: "5px 13px", 
-                borderRadius: 8, 
-                border: "1px solid rgba(255,255,255,0.08)", 
-                background: showExport ? "rgba(255,255,255,0.06)" : "rgba(255,255,255,0.04)", 
-                color: showExport ? "rgba(255,255,255,0.8)" : "rgba(255,255,255,0.45)", 
-                cursor: "pointer", 
-                fontSize: "0.78rem", 
-                fontFamily: "inherit", 
-                transition: "all 0.15s",
-                display: "flex",
-                alignItems: "center",
-                gap: 6
-              }}
-            >
-              <Icon d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3" size={12} />
-              Export
-            </button>
-
-            {/* Dropdown Menu */}
-            {showExport && (
-              <div style={{
-                position: "absolute",
-                top: "100%",
-                right: 0,
-                marginTop: 8,
-                background: "rgba(14,14,22,0.95)",
-                border: "1px solid rgba(255,255,255,0.08)",
-                borderRadius: 12,
-                padding: "4px",
-                width: 148,
-                boxShadow: "0 16px 40px rgba(0,0,0,0.6), 0 0 0 1px rgba(91,138,240,0.08)",
-                backdropFilter: "blur(16px)",
-                zIndex: 50,
-                display: "flex",
-                flexDirection: "column",
-                gap: 2
-              }}>
-                <button
-                  onClick={() => handleExport("pdf")}
-                  className="dropdown-item"
-                  style={{
-                    padding: "8px 10px",
-                    background: "transparent",
-                    border: "none",
-                    color: "rgba(255,255,255,0.7)",
-                    fontSize: "0.78rem",
-                    textAlign: "left",
-                    cursor: "pointer",
-                    borderRadius: 8,
-                    fontFamily: "inherit",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 8,
-                    transition: "background 0.15s, color 0.15s"
-                  }}
-                >
-                  <Icon d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8zM14 2v6h6" size={12} />
-                  Download PDF
-                </button>
-                <button
-                  onClick={() => handleExport("docx")}
-                  className="dropdown-item"
-                  style={{
-                    padding: "8px 10px",
-                    background: "transparent",
-                    border: "none",
-                    color: "rgba(255,255,255,0.7)",
-                    fontSize: "0.78rem",
-                    textAlign: "left",
-                    cursor: "pointer",
-                    borderRadius: 8,
-                    fontFamily: "inherit",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 8,
-                    transition: "background 0.15s, color 0.15s"
-                  }}
-                >
-                  <Icon d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8zM14 2v6h6" size={12} />
-                  Download DOCX
-                </button>
-              </div>
-            )}
+          <div style={{ width: 30, height: 30, borderRadius: "50%", background: "linear-gradient(135deg, #3A6AD4, #5B8AF0)", border: "1.5px solid rgba(91,138,240,0.4)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "0.68rem", fontWeight: 700, color: "white", cursor: "pointer", marginLeft: 4, boxShadow: "0 0 10px rgba(91,138,240,0.3)", overflow: "hidden" }}>
+            {user?.image
+              ? <img src={user.image} alt={user.name ?? 'User'} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+              : (user?.name?.[0] ?? user?.email?.[0] ?? 'U').toUpperCase()
+            }
           </div>
-
-          <div style={{ width: 30, height: 30, borderRadius: "50%", background: "linear-gradient(135deg, #3A6AD4, #5B8AF0)", border: "1.5px solid rgba(91,138,240,0.4)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "0.68rem", fontWeight: 700, color: "white", cursor: "pointer", marginLeft: 4, boxShadow: "0 0 10px rgba(91,138,240,0.3)" }}>U</div>
         </div>
       </header>
 
