@@ -323,6 +323,7 @@ def _run_query(
     request: QueryRequest,
     notebook_id: Optional[str] = None,
     skip_validation: bool = False,
+    query_vec=None,
 ) -> QueryResponse:
     """
     Shared retrieve-and-generate logic with multi-hop retrieval and answer validation.
@@ -337,6 +338,7 @@ def _run_query(
         request:          Validated query request.
         notebook_id:      If provided, restrict retrieval to this notebook.
         skip_validation:  If True, skip the answer-validation LLM call.
+        query_vec:        Pre-computed query embedding (skips re-embedding).
 
     Returns:
         QueryResponse with answer, references, sources, and quality grade.
@@ -353,6 +355,7 @@ def _run_query(
         notebook_id=notebook_id,
         max_hops=1,
         expansion_k=3,
+        query_vec=query_vec,
     )
 
     if not chunks:
@@ -599,14 +602,34 @@ async def batch_query(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    def _run_single(question: str, qk: int, nb_id: str):
+    loop = asyncio.get_running_loop()
+
+    if _state.embedder is not None:
+        import numpy as np
+        all_vecs = await loop.run_in_executor(
+            None,
+            lambda: _state.embedder.embed_batch(
+                questions, show_progress=False, use_cache=True,
+            ),
+        )
+        vec_map = {i: all_vecs[i] for i in range(len(questions))}
+        logger.info(
+            "Batch: pre-embedded %d questions in one call", len(questions),
+        )
+    else:
+        vec_map = {}
+
+    def _run_single(question: str, qk: int, nb_id: str, q_vec=None):
+        """Run a single query with an optional pre-computed embedding."""
         try:
             req = QueryRequest(question=question, top_k=qk)
-            return _run_query(req, notebook_id=nb_id, skip_validation=True)
+            return _run_query(
+                req, notebook_id=nb_id,
+                skip_validation=True, query_vec=q_vec,
+            )
         except HTTPException as exc:
             raise RuntimeError(exc.detail) from exc
 
-    loop = asyncio.get_running_loop()
     batch_results = await loop.run_in_executor(
         _state.batch_pool,
         batch_query_service.run_batch,
@@ -614,6 +637,7 @@ async def batch_query(
         _run_single,
         notebook_id,
         top_k,
+        vec_map,
     )
 
     results: List[BatchQueryResult] = []

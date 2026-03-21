@@ -175,7 +175,8 @@ def extract_questions(filename: str, raw_bytes: bytes) -> List[str]:
     )
 
 
-_BATCH_WORKERS = 3
+_BATCH_WORKERS = 5
+_STAGGER_DELAY = 0.35
 
 
 def _run_one(
@@ -185,6 +186,7 @@ def _run_one(
     top_k: int,
     notebook_id: str,
     total: int,
+    query_vec=None,
 ) -> BatchResult:
     """
     Execute a single question through the RAG pipeline.
@@ -192,17 +194,18 @@ def _run_one(
     Args:
         index:        Zero-based question index (for logging).
         question:     The question text.
-        run_query_fn: Callable(question, top_k, notebook_id) -> response.
+        run_query_fn: Callable(question, top_k, notebook_id, q_vec) -> response.
         top_k:        Number of chunks to retrieve.
         notebook_id:  Notebook scope.
         total:        Total number of questions (for log messages).
+        query_vec:    Pre-computed embedding vector (avoids re-embedding).
 
     Returns:
         BatchResult for this question.
     """
     t0 = time.perf_counter()
     try:
-        resp = run_query_fn(question, top_k, notebook_id)
+        resp = run_query_fn(question, top_k, notebook_id, query_vec)
         elapsed = (time.perf_counter() - t0) * 1000
 
         grade_dict = None
@@ -255,36 +258,46 @@ def run_batch(
     run_query_fn,
     notebook_id: str,
     top_k: int = 5,
+    vec_map: Optional[Dict] = None,
 ) -> List[BatchResult]:
     """
     Execute a list of questions in parallel through the RAG pipeline.
 
     Uses a thread pool to process up to ``_BATCH_WORKERS`` questions
-    concurrently.  Each question is run independently; failures are
-    captured per-question so the batch continues even if individual
-    questions error out.
+    concurrently.  Submissions are staggered by ``_STAGGER_DELAY``
+    seconds to prevent API rate-limit bursts.  Pre-computed embedding
+    vectors from ``vec_map`` are passed to each worker so the
+    embedding API is not called again per-question.
 
     Args:
         questions:    List of question strings.
-        run_query_fn: Callable(question, top_k, notebook_id) -> QueryResponse-like obj.
+        run_query_fn: Callable(question, top_k, notebook_id, q_vec) -> response.
         notebook_id:  Notebook scope for retrieval.
         top_k:        Number of chunks per question.
+        vec_map:      Optional dict mapping question index → pre-computed
+                      embedding ndarray.
 
     Returns:
         List of BatchResult, one per question in the original order.
     """
     total = len(questions)
     workers = min(_BATCH_WORKERS, total)
+    vec_map = vec_map or {}
 
     ordered: Dict[int, BatchResult] = {}
 
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="batchq") as pool:
-        futures = {
-            pool.submit(
-                _run_one, i, q, run_query_fn, top_k, notebook_id, total,
-            ): i
-            for i, q in enumerate(questions)
-        }
+        futures: Dict = {}
+        for i, q in enumerate(questions):
+            q_vec = vec_map.get(i)
+            fut = pool.submit(
+                _run_one, i, q, run_query_fn, top_k,
+                notebook_id, total, q_vec,
+            )
+            futures[fut] = i
+            if i < total - 1:
+                time.sleep(_STAGGER_DELAY)
+
         for future in as_completed(futures):
             idx = futures[future]
             ordered[idx] = future.result()
