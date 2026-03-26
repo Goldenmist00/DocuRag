@@ -339,7 +339,7 @@ export default function BooksPage() {
       <header style={{ height: 56, background: '#000', borderBottom: '1px solid #1a1a1a', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 24px', position: 'sticky', top: 0, zIndex: 50 }}>
         <Link href="/" style={{ textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 8 }}>
           <div style={{ width: 110, height: 32, overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <img src="/logo.png" alt="MindSync" style={{ height: 70, width: 154, objectFit: 'contain', flexShrink: 0 }} />
+            <img src="/logo.png" alt="DocuRag" style={{ height: 70, width: 154, objectFit: 'contain', flexShrink: 0 }} />
           </div>
         </Link>
         <div style={{ position: 'relative' }}>

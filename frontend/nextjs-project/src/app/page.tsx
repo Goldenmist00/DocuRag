@@ -165,7 +165,7 @@ export default function Home() {
                   </motion.h2>
                   <motion.p initial={{ opacity: 0, y: 16 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true }} transition={{ duration: 0.55, delay: 0.12 }}
                     style={{ fontFamily: "var(--font-hero-body)", fontSize: "0.95rem", color: "rgba(255,255,255,0.35)", maxWidth: 560, margin: "0 auto", lineHeight: 1.8 }}>
-                    Unlike generic AI tools, MindSync ties every response directly to your source material — so you never have to wonder where the information came from.
+                    Unlike generic AI tools, DocuRag ties every response directly to your source material — so you never have to wonder where the information came from.
                   </motion.p>
                 </div>
 
@@ -316,7 +316,7 @@ export default function Home() {
             {/* ══ FOOTER ══ */}
             <footer style={{ padding: "1.75rem 1.5rem", borderTop: "1px solid rgba(255,255,255,0.04)" }}>
               <div style={{ maxWidth: 1200, margin: "0 auto", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                <p style={{ fontFamily: "var(--font-hero-mono)", fontSize: "0.7rem", color: "rgba(255,255,255,0.14)", letterSpacing: "0.1em" }}>© 2026 MindSync. All rights reserved.</p>
+                <p style={{ fontFamily: "var(--font-hero-mono)", fontSize: "0.7rem", color: "rgba(255,255,255,0.14)", letterSpacing: "0.1em" }}>© 2026 DocuRag. All rights reserved.</p>
               </div>
             </footer>
 

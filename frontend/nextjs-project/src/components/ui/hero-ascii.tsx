@@ -127,7 +127,7 @@ function HeroAscii() {
           <Link href="/" className="relative shrink-0 block" style={{ height: '100px', width: '250px' }}>
             <Image
               src="/logo.png"
-              alt="MindSync"
+              alt="DocuRag"
               fill
               className="object-contain"
               priority

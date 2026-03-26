@@ -26,7 +26,7 @@ const sora = Sora({
 });
 
 export const metadata: Metadata = {
-  title: "MindSync — Search. Understand. Visualize. Learn.",
+  title: "DocuRag — Search. Understand. Visualize. Learn.",
   description:
     "Ask questions, visualize concepts, generate flashcards, and verify answers — all grounded directly in your study material.",
   icons: {

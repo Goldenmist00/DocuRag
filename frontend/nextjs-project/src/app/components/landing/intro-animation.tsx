@@ -122,7 +122,7 @@ export function IntroAnimation({ onComplete }: { onComplete: () => void }) {
           {/* ── center stage ── */}
           <div style={{ position: "relative", zIndex: 10, display: "flex", flexDirection: "column", alignItems: "center", gap: 0 }}>
 
-            {/* MindSync logo */}
+            {/* DocuRag logo */}
             <motion.div
               style={{ position: "relative", marginBottom: 40 }}
               initial={{ scale: 0, opacity: 0 }}
@@ -161,7 +161,7 @@ export function IntroAnimation({ onComplete }: { onComplete: () => void }) {
               >
                 <Image
                   src="/logo.png"
-                  alt="MindSync"
+                  alt="DocuRag"
                   width={120}
                   height={120}
                   style={{ objectFit: "contain" }}

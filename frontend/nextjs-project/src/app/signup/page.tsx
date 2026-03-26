@@ -152,7 +152,7 @@ export default function SignUpPage() {
           <path d="M19 12H5M5 12L12 19M5 12L12 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
         <div style={{ width: 110, height: 32, overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center" }}>
-          <img src="/logo.png" alt="MindSync" style={{ height: 70, width: 154, objectFit: "contain", flexShrink: 0 }} />
+          <img src="/logo.png" alt="DocuRag" style={{ height: 70, width: 154, objectFit: "contain", flexShrink: 0 }} />
         </div>
       </Link>
 
@@ -165,7 +165,7 @@ export default function SignUpPage() {
             Create your account
           </h1>
           <p style={{ marginTop: "8px", fontSize: "0.875rem", color: "rgba(255,255,255,0.4)", lineHeight: 1.5 }}>
-            Start learning smarter with MindSync.
+            Start learning smarter with DocuRag.
           </p>
         </div>
 

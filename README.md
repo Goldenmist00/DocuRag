@@ -62,7 +62,7 @@ The system goes beyond basic vector search by combining per-source retrieval all
 ```
                      +-------------------+
                      |  Next.js Frontend |
-                     |    (MindSync)     |
+                     |    (DocuRag)     |
                      +---------+---------+
                                |
                           HTTP / REST
@@ -112,7 +112,7 @@ The backend follows a layered architecture:
 
 ### Frontend
 
-The frontend (branded "MindSync") is a Next.js 14 application providing:
+The frontend (branded "DocuRag") is a Next.js 14 application providing:
 
 - Notebook management with source upload and processing status tracking
 - Chat-style Q&A interface with markdown rendering and citation display

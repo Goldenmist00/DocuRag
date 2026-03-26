@@ -326,7 +326,7 @@ input:-webkit-autofill:focus {
 .fs-panel-enter   { animation: fsPanelIn    0.32s cubic-bezier(0.22,1,0.36,1) both; }
 .fs-panel-exit    { animation: fsPanelOut   0.22s cubic-bezier(0.55,0,1,0.45) both; }
 
-/* ── MindSync page transition (Try MindSync click) ── */
+/* ── DocuRag page transition (Try DocuRag click) ── */
 @keyframes msTransitionIn {
   0%   { opacity: 0; }
   20%  { opacity: 1; }
