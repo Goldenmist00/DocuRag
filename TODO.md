@@ -52,30 +52,30 @@
 
 ---
 
-## ❌ TODO (30%)
+## ⛔ TODO (30%)
 
 ### Phase 4: Retrieval (Priority 1 - NEXT)
 - [ ] Create `src/retriever.py`
-  - [ ] Two-stage retrieval
-  - [ ] Vector search (top 10)
-  - [ ] Cross-encoder reranking
-  - [ ] Deduplication logic
-  - [ ] Return top 5 with scores
+ - [ ] Two-stage retrieval
+ - [ ] Vector search (top 10)
+ - [ ] Cross-encoder reranking
+ - [ ] Deduplication logic
+ - [ ] Return top 5 with scores
 
 ### Phase 5: Generation (Priority 3)
 - [ ] Create `src/generator.py`
-  - [ ] NVIDIA API integration
-  - [ ] Prompt template with grounding instructions
-  - [ ] Reference extraction
-  - [ ] Error handling and retries
+ - [ ] NVIDIA API integration
+ - [ ] Prompt template with grounding instructions
+ - [ ] Reference extraction
+ - [ ] Error handling and retries
 
 ### Phase 6: Pipeline Integration (Priority 4)
 - [x] Complete `scripts/run_pipeline.py`
-  - [x] Implement `run_embed()`
-  - [x] Implement `run_index()`
-  - [ ] Implement `run_generate()`
-  - [ ] Add caching checks
-  - [ ] Generate `outputs/submission.csv`
+ - [x] Implement `run_embed()`
+ - [x] Implement `run_index()`
+ - [ ] Implement `run_generate()`
+ - [ ] Add caching checks
+ - [ ] Generate `outputs/submission.csv`
 
 ### Configuration Fixes
 - [ ] Fix config.yaml to read NVIDIA_API_BASE from .env
@@ -94,7 +94,7 @@
 
 ---
 
-## 🐛 Known Issues (Fixed)
+## ὁb Known Issues (Fixed)
 
 - [x] ~~Overlap logic only kept last sentence~~ - FIXED
 - [x] ~~Chapter intro text was dropped~~ - FIXED
@@ -102,7 +102,7 @@
 
 ---
 
-## 📋 Build Order
+## Ὅ6 Build Order
 
 1. **Embedder** - Convert chunks to vectors
 2. **Test embedder** - Verify embeddings are correct shape
@@ -117,17 +117,17 @@
 
 ---
 
-## 🎯 Next Steps
+## ⏩ Next Steps
 
 **Immediate (Priority 1):**
 1. ✅ ~~Build `src/embedder.py`~~ - DONE
 2. ✅ ~~Test embedding generation~~ - DONE
 3. ✅ ~~Integrate with vector store~~ - DONE
-4. **Build `src/retriever.py`** ← YOU ARE HERE
-   - Two-stage retrieval (vector search + reranking)
-   - Cross-encoder for reranking
-   - Deduplication logic
-   - Return top 5 with scores
+4. **Build `src/retriever.py`** → YOU ARE HERE
+ - Two-stage retrieval (vector search + reranking)
+ - Cross-encoder for reranking
+ - Deduplication logic
+ - Return top 5 with scores
 
 **Then (Priority 2):**
 5. Build `src/generator.py`
