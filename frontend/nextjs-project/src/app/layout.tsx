@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Inria_Sans, JetBrains_Mono, Sora } from "next/font/google";
 import "./globals.css";
 import { ToastProvider } from "@/components/ui/toast";
+import GlobalNav from "@/components/ui/global-nav";
 
 const inriaSans = Inria_Sans({
   subsets: ["latin"],
@@ -43,7 +44,10 @@ export default function RootLayout({
   return (
     <html lang="en" className={`${inriaSans.variable} ${jetbrainsMono.variable} ${sora.variable}`}>
       <body>
-        <ToastProvider>{children}</ToastProvider>
+        <ToastProvider>
+          <GlobalNav />
+          {children}
+        </ToastProvider>
       </body>
     </html>
   );

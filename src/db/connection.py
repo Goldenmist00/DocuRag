@@ -7,8 +7,10 @@ Provides a single ``get_pool()`` accessor that lazily creates a
 ``ThreadedConnectionPool`` on first call and reuses it afterward.
 """
 
+import functools
 import logging
 import os
+import time
 from contextlib import contextmanager
 from typing import Generator, Optional
 
@@ -97,6 +99,14 @@ def get_connection() -> Generator:
 
         yield conn
         conn.commit()
+    except psycopg2.OperationalError:
+        if conn:
+            try:
+                p.putconn(conn, close=True)
+            except Exception:
+                pass
+            conn = None
+        raise
     except Exception:
         if conn:
             try:
@@ -107,6 +117,45 @@ def get_connection() -> Generator:
     finally:
         if conn:
             p.putconn(conn)
+
+
+MAX_DB_RETRIES = 2
+RETRY_DELAY_S = 1.0
+
+
+def retry_on_disconnect(fn):
+    """Retry a DB-service function when the server drops the connection mid-query.
+
+    Wraps *fn* so that ``psycopg2.OperationalError`` (e.g. Neon idle
+    disconnect) triggers up to ``MAX_DB_RETRIES`` transparent retries with
+    a brief sleep between attempts.  The function **must** obtain its own
+    connection via ``get_connection()`` on each call — this is the normal
+    pattern in our db-service modules.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        last_err: Optional[Exception] = None
+        for attempt in range(MAX_DB_RETRIES + 1):
+            try:
+                return fn(*args, **kwargs)
+            except psycopg2.OperationalError as exc:
+                last_err = exc
+                if attempt < MAX_DB_RETRIES:
+                    logger.warning(
+                        "DB connection lost in %s (attempt %d/%d), retrying in %.1fs: %s",
+                        fn.__name__,
+                        attempt + 1,
+                        MAX_DB_RETRIES + 1,
+                        RETRY_DELAY_S,
+                        exc,
+                    )
+                    time.sleep(RETRY_DELAY_S)
+                    continue
+        logger.error("All %d retries exhausted for %s", MAX_DB_RETRIES + 1, fn.__name__)
+        raise last_err  # type: ignore[misc]
+
+    return wrapper
 
 
 def close_pool() -> None:
