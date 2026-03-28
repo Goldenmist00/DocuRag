@@ -319,3 +319,29 @@ class Embedder:
     def device(self) -> str:
         """Compatibility property — embedder is API-based."""
         return "api"
+
+
+_singleton_embedder: Optional[Embedder] = None
+_singleton_lock = threading.Lock()
+
+
+def get_embedder() -> Embedder:
+    """Return a process-wide singleton Embedder instance.
+
+    Avoids repeated initialization, cache loading, and API key
+    validation on every call site.
+
+    Returns:
+        Shared ``Embedder`` instance.
+
+    Raises:
+        ValueError: If no NVIDIA API key is configured.
+    """
+    global _singleton_embedder
+    if _singleton_embedder is not None:
+        return _singleton_embedder
+    with _singleton_lock:
+        if _singleton_embedder is not None:
+            return _singleton_embedder
+        _singleton_embedder = Embedder()
+        return _singleton_embedder

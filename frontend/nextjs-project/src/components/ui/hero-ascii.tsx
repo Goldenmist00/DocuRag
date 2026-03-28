@@ -3,7 +3,7 @@
 import Image from 'next/image';
 import Link from 'next/link';
 import { useEffect, useRef, memo } from 'react';
-import { BookOpen, ShieldCheck, LayoutDashboard, Sparkles } from 'lucide-react';
+import { BookOpen, ShieldCheck, LayoutDashboard, Sparkles, GitBranch } from 'lucide-react';
 
 const BRANDING_STYLE = `
   [data-us-project] {
@@ -146,6 +146,10 @@ function HeroAscii() {
             <Link href="#cta" className="flex items-center gap-2.5 px-5 py-2.5 rounded-md text-sm tracking-[0.12em] uppercase text-white/40 hover:text-white/80 hover:bg-white/[0.04] transition-all duration-200">
               <BookOpen size={16} className="opacity-50" />
               Get Started
+            </Link>
+            <Link href="/repos" className="flex items-center gap-2.5 px-5 py-2.5 rounded-md text-sm tracking-[0.12em] uppercase text-white/40 hover:text-white/80 hover:bg-white/[0.04] transition-all duration-200">
+              <GitBranch size={16} className="opacity-50" />
+              Repos
             </Link>
             <div className="w-px h-6 bg-white/[0.08] mx-3" />
             <Link href="/signup" className="flex items-center gap-2.5 px-6 py-2.5 rounded-md text-sm tracking-[0.12em] uppercase bg-white text-[#060609] font-semibold hover:bg-white/90 transition-all duration-200">

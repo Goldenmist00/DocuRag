@@ -102,6 +102,12 @@ input:-webkit-autofill:focus {
 .dot-1 { animation-delay: 0.2s; }
 .dot-2 { animation-delay: 0.4s; }
 
+/* ── Repo progress bar shimmer ── */
+@keyframes progressShimmer {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.45; }
+}
+
 /* ── Feature card stagger entrance ── */
 @keyframes cardEntrance {
   from {
@@ -415,5 +421,74 @@ input:-webkit-autofill:focus {
 .pointer-events-none[style*="translate3d"] {
   backface-visibility: hidden;
   -webkit-backface-visibility: hidden;
+}
+
+/* ── Session page ── */
+@keyframes sessionSlideIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.session-entry {
+  animation: sessionSlideIn 0.18s ease-out both;
+}
+
+.session-user-msg .session-hover-actions {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+.session-user-msg:hover .session-hover-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.session-turn-header:hover {
+  background: rgba(255,255,255,0.02) !important;
+}
+
+.session-turn:hover {
+  border-color: rgba(255,255,255,0.1) !important;
+}
+
+.session-tool-row:hover {
+  background: rgba(255,255,255,0.025) !important;
+}
+
+.session-btn:hover {
+  color: rgba(255,255,255,0.65) !important;
+}
+
+.session-btn-primary:hover {
+  background: #e8e8e8 !important;
+}
+
+.session-card:hover {
+  border-color: rgba(255,255,255,0.1) !important;
+}
+
+.session-input:focus {
+  border-color: rgba(255,255,255,0.18) !important;
+}
+
+.session-action:hover {
+  border-color: rgba(255,255,255,0.18) !important;
+  color: rgba(255,255,255,0.7) !important;
+}
+
+.session-danger:hover {
+  border-color: rgba(255,80,80,0.3) !important;
+  color: rgba(255,80,80,0.8) !important;
+}
+
+.session-warn:hover {
+  border-color: rgba(255,200,60,0.3) !important;
+  color: rgba(255,200,60,0.8) !important;
+}
+
+.session-cp-btn:hover {
+  border-color: rgba(80,200,255,0.25) !important;
+  color: rgba(80,200,255,0.7) !important;
+  background: rgba(80,200,255,0.05) !important;
 }
 

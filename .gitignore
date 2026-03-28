@@ -57,6 +57,12 @@ htmlcov/
 *.log
 logs/
 
+# Cloned repos (runtime data from agent sessions)
+repos/
+
+# Instructions/docs
+Instructions/
+
 # Docker
 .dockerignore
 docker-compose*.yml

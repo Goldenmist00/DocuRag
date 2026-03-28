@@ -2802,7 +2802,7 @@ function DashboardInner() {
   }, []);
 
   return (
-    <div style={{ height: "100vh", display: "flex", flexDirection: "column", background: "#000", color: "white", fontFamily: "var(--font-inria), 'Inria Sans', sans-serif", overflow: "hidden" }}>
+    <div style={{ height: "calc(100vh - 52px)", marginTop: 52, display: "flex", flexDirection: "column", background: "#000", color: "white", fontFamily: "var(--font-inria), 'Inria Sans', sans-serif", overflow: "hidden" }}>
 
       {/* Header */}
       <header style={{ height: 54, background: "#000", borderBottom: "1px solid #1a1a1a", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 18px", flexShrink: 0, zIndex: 20 }}>

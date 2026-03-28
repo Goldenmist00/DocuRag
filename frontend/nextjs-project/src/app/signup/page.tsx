@@ -102,6 +102,7 @@ export default function SignUpPage() {
     <div
       style={{
         minHeight: "100vh",
+        paddingTop: 52,
         width: "100%",
         background: "#060609",
         display: "flex",
