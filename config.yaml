@@ -48,6 +48,26 @@ cache:
   embeddings_cache: "embeddings/cache"
   processed_chunks_path: "data/processed/chunks.jsonl"
 
+# Repo Analyzer
+repo_analyzer:
+  repos_dir: "repos"
+  worktrees_dir_suffix: "-worktrees"
+  max_file_size: 100000
+  max_concurrent_sessions: 3
+
+  ingest:
+    max_workers: 3
+    llm_timeout: 30
+
+  consolidation:
+    batch_size: 25
+    auto_consolidate: true
+
+  coding_agent:
+    max_turns: 30
+    tool_timeout: 30
+    max_output_size: 10240
+
 # Logging
 logging:
   level: "INFO"

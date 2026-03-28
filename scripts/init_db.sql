@@ -6,10 +6,11 @@ CREATE EXTENSION IF NOT EXISTS vector;
 
 -- ─── Notebooks ───
 CREATE TABLE IF NOT EXISTS notebooks (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    title       TEXT NOT NULL DEFAULT 'Untitled notebook',
-    created_at  TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    updated_at  TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    title                 TEXT NOT NULL DEFAULT 'Untitled notebook',
+    conversation_history  JSONB DEFAULT '[]',
+    created_at            TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at            TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 -- ─── Sources (per notebook) ───

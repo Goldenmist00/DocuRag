@@ -113,12 +113,13 @@ function NoteIcon({ size = 20 }: { size?: number }) {  return (
   );
 }
 
-function BookCard({ book, view, openMenu, setOpenMenu, onOpen, onDelete, onRename }: {
+function BookCard({ book, view, openMenu, setOpenMenu, onOpen, onDelete, onRename, onUseWithRepo }: {
   book: Book; view: 'grid' | 'list';
   openMenu: string | null; setOpenMenu: (id: string | null) => void;
   onOpen: (id: string) => void;
   onDelete: (id: string) => void;
   onRename: (id: string) => void;
+  onUseWithRepo: (id: string) => void;
 }) {
   const [hovered, setHovered] = useState(false);
 
@@ -193,6 +194,7 @@ function BookCard({ book, view, openMenu, setOpenMenu, onOpen, onDelete, onRenam
       {openMenu === book.id && (
         <div style={{ position: 'absolute', top: view === 'grid' ? 42 : 36, right: 8, zIndex: 100, background: '#111', border: '1px solid #222', borderRadius: 8, padding: 4, boxShadow: '0 8px 24px rgba(0,0,0,0.5)', minWidth: 140 }}>
           <DropdownItem label="Rename" icon="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" onClick={() => { setOpenMenu(null); onRename(book.id); }} />
+          <DropdownItem label="Use with Repo" icon="M13 10V3L4 14h7v7l9-11h-7z" onClick={() => { setOpenMenu(null); onUseWithRepo(book.id); }} />
           <DropdownItem label="Delete" icon="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" isDelete onClick={() => onDelete(book.id)} />
         </div>
       )}
@@ -303,6 +305,10 @@ export default function BooksPage() {
     }
   };
 
+  const handleUseWithRepo = (id: string) => {
+    router.push(`/repos?notebook=${id}`);
+  };
+
   const handleRenameStart = (id: string) => {
     const book = books.find(b => b.id === id);
     if (book) setRenaming({ id, title: book.title });
@@ -330,7 +336,7 @@ export default function BooksPage() {
 
   return (
     <div
-      style={{ minHeight: '100vh', background: '#000', color: '#fff', fontFamily: "var(--font-inria), 'Inria Sans', sans-serif" }}
+      style={{ minHeight: '100vh', paddingTop: 52, background: '#000', color: '#fff', fontFamily: "var(--font-inria), 'Inria Sans', sans-serif" }}
       onClick={() => { setOpenMenu(null); setSortOpen(false); setUserMenuOpen(false); }}
     >
       <LoadingOverlay visible={creating} mode="create" />
@@ -381,11 +387,25 @@ export default function BooksPage() {
 
       {/* Toolbar */}
       <div style={{ background: '#000', borderBottom: '1px solid #1a1a1a', padding: '0 24px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', height: 52, gap: 12, position: 'sticky', top: 56, zIndex: 40 }}>
-        {/* Tabs */}
+        {/* Route tabs + filter tabs */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
+          <span style={{
+            padding: '6px 14px', color: '#fff', fontSize: 13, fontWeight: 500,
+            borderBottom: '1px solid #fff', cursor: 'default',
+          }}>
+            Notebooks
+          </span>
+          <Link href="/repos" style={{
+            padding: '6px 14px', textDecoration: 'none',
+            color: 'rgba(255,255,255,0.35)', fontSize: 13, fontWeight: 400,
+            borderBottom: '1px solid transparent', transition: 'color 0.15s',
+          }}>
+            Repositories
+          </Link>
+          <div style={{ width: 1, height: 16, background: 'rgba(255,255,255,0.08)', margin: '0 8px' }} />
           {(['all', 'mine'] as const).map(t => (
-            <button key={t} onClick={() => setTab(t)} style={{ padding: '6px 14px', border: 'none', background: 'none', color: tab === t ? '#fff' : 'rgba(255,255,255,0.35)', fontSize: 13, fontWeight: tab === t ? 500 : 400, cursor: 'pointer', fontFamily: 'inherit', borderBottom: tab === t ? '1px solid #fff' : '1px solid transparent', transition: 'color 0.15s, border-color 0.15s', letterSpacing: '-0.01em' }}>
-              {t === 'all' ? 'All notebooks' : 'My notebooks'}
+            <button key={t} onClick={() => setTab(t)} style={{ padding: '6px 14px', border: 'none', background: 'none', color: tab === t ? 'rgba(255,255,255,0.7)' : 'rgba(255,255,255,0.25)', fontSize: 12, fontWeight: tab === t ? 500 : 400, cursor: 'pointer', fontFamily: 'inherit', borderBottom: tab === t ? '1px solid rgba(255,255,255,0.3)' : '1px solid transparent', transition: 'color 0.15s, border-color 0.15s', letterSpacing: '-0.01em' }}>
+              {t === 'all' ? 'All' : 'Mine'}
             </button>
           ))}
         </div>
@@ -495,7 +515,7 @@ export default function BooksPage() {
         <div style={view === 'grid' ? { display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 } : { display: 'flex', flexDirection: 'column', gap: 6 }}>
           <CreateCard view={view} onCreate={handleCreate} />
           {filtered.map(book => (
-            <BookCard key={book.id} book={book} view={view} openMenu={openMenu} setOpenMenu={setOpenMenu} onOpen={handleOpen} onDelete={handleDelete} onRename={handleRenameStart} />
+            <BookCard key={book.id} book={book} view={view} openMenu={openMenu} setOpenMenu={setOpenMenu} onOpen={handleOpen} onDelete={handleDelete} onRename={handleRenameStart} onUseWithRepo={handleUseWithRepo} />
           ))}
         </div>
       </main>

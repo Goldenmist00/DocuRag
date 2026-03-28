@@ -124,7 +124,20 @@ export default function LoginPage() {
   }, []);
 
   return (
-    <div style={{ minHeight: "100vh", width: "100%", background: "#060609", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "var(--font-inria), 'Inria Sans', sans-serif", position: "relative", padding: "24px" }}>
+    <div
+      style={{
+        minHeight: "100vh",
+        paddingTop: 52,
+        width: "100%",
+        background: "#060609",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        fontFamily: "var(--font-inria), 'Inria Sans', sans-serif",
+        position: "relative",
+        padding: "24px",
+      }}
+    >
       <BackgroundGradient />
 
       <Link href="/"

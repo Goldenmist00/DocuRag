@@ -57,9 +57,16 @@ from src.retriever import Retriever, RetrievedChunk, create_retriever
 from src.vector_store import PgVectorStore
 from src.services import notebook_service, source_service, podcast_service
 from src.services import batch_query_service
-from src.db import podcast_db, chunk_db, chunk_graph_db
+from src.db import (
+    podcast_db, chunk_db, chunk_graph_db, notebook_db,
+    repo_db, repo_memory_db, repo_context_db, session_db,
+    repo_reference_db, repo_code_chunk_db,
+)
 from src.services.answer_validator import AnswerValidator
 from services import summaryService, quizService, mindMapService, flashcardService
+from src.controllers.repo_controller import router as repo_router
+from src.controllers.session_controller import router as session_router
+from src.controllers.github_controller import router as github_router
 
 logger = logging.getLogger(__name__)
 
@@ -257,6 +264,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     podcast_db.ensure_table()
     chunk_graph_db.ensure_table()
     chunk_db.ensure_hnsw_index()
+    notebook_db.ensure_conversation_history_column()
+
+    repo_db.ensure_table()
+    repo_memory_db.ensure_table()
+    repo_context_db.ensure_table()
+    repo_reference_db.ensure_table()
+    repo_code_chunk_db.ensure_table()
+    session_db.ensure_table()
+
+    from src.db import github_db
+    github_db.ensure_table()
 
     try:
         _state.validator = AnswerValidator()
@@ -313,6 +331,10 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["*"],
 )
+
+app.include_router(repo_router)
+app.include_router(session_router)
+app.include_router(github_router)
 
 
 # ---------------------------------------------------------------------------
@@ -549,14 +571,120 @@ async def notebook_query(notebook_id: str, request: QueryRequest) -> QueryRespon
     Answer a question using only this notebook's sources.
 
     Embeds the question, searches chunks scoped to the notebook,
-    and generates a cited answer.
+    generates a cited answer, and persists the Q&A pair to the
+    notebook's conversation history for later context export.
     """
     try:
         notebook_service.get_notebook(notebook_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
-    return _run_query(request, notebook_id=notebook_id)
+    result = _run_query(request, notebook_id=notebook_id)
+
+    try:
+        notebook_db.append_conversation_entry(
+            notebook_id, {"role": "user", "content": request.question},
+        )
+        notebook_db.append_conversation_entry(
+            notebook_id, {"role": "ai", "content": result.answer},
+        )
+    except Exception:
+        logger.warning("Failed to persist conversation entry for notebook %s", notebook_id, exc_info=True)
+
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  NOTEBOOK CONVERSATION HISTORY
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@app.get(
+    "/notebooks/{notebook_id}/history",
+    summary="Get notebook conversation history",
+)
+async def get_notebook_history(notebook_id: str):
+    """Return the full Q&A conversation history for a notebook.
+
+    Args:
+        notebook_id: UUID of the notebook.
+
+    Returns:
+        List of ``{role, content}`` message dicts.
+
+    Raises:
+        HTTPException: 404 if notebook not found.
+    """
+    try:
+        notebook_service.get_notebook(notebook_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    return notebook_db.get_conversation_history(notebook_id)
+
+
+@app.delete(
+    "/notebooks/{notebook_id}/history",
+    status_code=204,
+    summary="Clear notebook conversation history",
+)
+async def clear_notebook_history(notebook_id: str):
+    """Reset the conversation history for a notebook.
+
+    Args:
+        notebook_id: UUID of the notebook.
+
+    Raises:
+        HTTPException: 404 if notebook not found.
+    """
+    try:
+        notebook_service.get_notebook(notebook_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    notebook_db.clear_conversation_history(notebook_id)
+
+
+@app.get(
+    "/notebooks/{notebook_id}/export-context",
+    summary="Export notebook context for repo session import",
+)
+async def export_notebook_context(notebook_id: str):
+    """Bundle notebook title, sources, and conversation into a context payload.
+
+    This payload can be imported into a repo agent session to give the
+    coding agent full awareness of everything planned in the notebook.
+
+    Args:
+        notebook_id: UUID of the notebook.
+
+    Returns:
+        Dict with ``notebook_id``, ``title``, ``sources``, and
+        ``conversation_history``.
+
+    Raises:
+        HTTPException: 404 if notebook not found.
+    """
+    try:
+        nb = notebook_service.get_notebook(notebook_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    from src.db import source_db
+    sources_raw = source_db.list_sources(notebook_id)
+    sources_summary = [
+        {"name": s.get("name", ""), "source_type": s.get("source_type", "")}
+        for s in sources_raw
+    ]
+
+    history = notebook_db.get_conversation_history(notebook_id)
+
+    return {
+        "notebook_id": nb["id"],
+        "title": nb["title"],
+        "sources": sources_summary,
+        "conversation_history": history,
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════
