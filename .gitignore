@@ -58,7 +58,7 @@ htmlcov/
 logs/
 
 # Cloned repos (runtime data from agent sessions)
-repos/
+/repos/
 
 # Instructions/docs
 Instructions/
