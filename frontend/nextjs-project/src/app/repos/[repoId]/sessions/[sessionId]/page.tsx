@@ -985,8 +985,9 @@ export default function SessionPage() {
     return () => window.removeEventListener("focus", onFocus);
   }, []);
 
-  const handleConnectGitHub = () => {
-    window.open(getGitHubAuthUrl(), "github-auth", "width=600,height=700");
+  const handleConnectGitHub = async () => {
+    const url = await getGitHubAuthUrl();
+    window.open(url, "github-auth", "width=600,height=700");
   };
 
   const handleDisconnectGitHub = async () => {
