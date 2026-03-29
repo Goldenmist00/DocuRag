@@ -16,12 +16,13 @@ logger = logging.getLogger(__name__)
 MAX_TITLE_LENGTH = 200
 
 
-def create_notebook(title: Optional[str] = None) -> Dict:
+def create_notebook(title: Optional[str] = None, user_id: Optional[str] = None) -> Dict:
     """
-    Create a new notebook with an optional title.
+    Create a new notebook with an optional title, owned by the given user.
 
     Args:
-        title: Display title (defaults to "Untitled notebook").
+        title:   Display title (defaults to "Untitled notebook").
+        user_id: Email of the owning user (for multi-tenancy).
 
     Returns:
         Created notebook dict.
@@ -33,19 +34,22 @@ def create_notebook(title: Optional[str] = None) -> Dict:
     if len(clean_title) > MAX_TITLE_LENGTH:
         raise ValueError(f"Title must be {MAX_TITLE_LENGTH} characters or fewer.")
 
-    nb = notebook_db.create_notebook(clean_title)
-    logger.info("Created notebook %s: %s", nb["id"], nb["title"])
+    nb = notebook_db.create_notebook(clean_title, user_id=user_id)
+    logger.info("Created notebook %s: %s (user=%s)", nb["id"], nb["title"], user_id)
     return nb
 
 
-def list_notebooks() -> List[Dict]:
+def list_notebooks(user_id: Optional[str] = None) -> List[Dict]:
     """
-    List all notebooks, most recently updated first.
+    List notebooks for the given user, most recently updated first.
+
+    Args:
+        user_id: If set, filter to this user's notebooks.
 
     Returns:
         List of notebook dicts with source_count.
     """
-    return notebook_db.list_notebooks()
+    return notebook_db.list_notebooks(user_id=user_id)
 
 
 def get_notebook(notebook_id: str) -> Dict:

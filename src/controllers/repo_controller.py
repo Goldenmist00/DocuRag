@@ -8,14 +8,16 @@ method, and returns the response.  **No business logic lives here.**
 """
 
 import logging
+from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from src.controllers.repo_schemas import (
     ErrorResponse,
     RepoCreate,
     RepoQueryRequest,
 )
+from src.utils.auth import get_current_user
 from src.utils.repo_errors import RepoAnalyzerError
 from src.utils.repo_validation import validate_repo_id
 
@@ -25,11 +27,12 @@ router = APIRouter(prefix="/repos", tags=["repos"])
 
 
 @router.post("", status_code=202, responses={409: {"model": ErrorResponse}})
-async def create_repo(body: RepoCreate):
+async def create_repo(body: RepoCreate, user_id: Optional[str] = Depends(get_current_user)):
     """Register and clone a GitHub repository.
 
     Args:
-        body: ``RepoCreate`` with ``remote_url`` and optional ``auth_token``.
+        body:    ``RepoCreate`` with ``remote_url`` and optional ``auth_token``.
+        user_id: Authenticated user email (injected via dependency).
 
     Returns:
         Repo dict with ``id`` and ``status``.
@@ -40,21 +43,24 @@ async def create_repo(body: RepoCreate):
     from src.agents.orchestrator import register_repo
 
     try:
-        return await register_repo(body.remote_url, body.auth_token)
+        return await register_repo(body.remote_url, body.auth_token, user_id=user_id)
     except RepoAnalyzerError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc))
 
 
 @router.get("")
-async def list_repos():
-    """Return all registered repos ordered by creation date.
+async def list_repos(user_id: Optional[str] = Depends(get_current_user)):
+    """Return repos for the authenticated user, ordered by creation date.
+
+    Args:
+        user_id: Authenticated user email (injected via dependency).
 
     Returns:
         List of repo dicts.
     """
     from src.db import repo_db
 
-    return repo_db.list_all()
+    return repo_db.list_all(user_id=user_id)
 
 
 @router.get("/{repo_id}")

@@ -39,6 +39,7 @@ from typing import AsyncGenerator, Dict, List, Optional
 import yaml
 from dotenv import load_dotenv
 from fastapi import (
+    Depends,
     FastAPI,
     File,
     HTTPException,
@@ -67,6 +68,7 @@ from services import summaryService, quizService, mindMapService, flashcardServi
 from src.controllers.repo_controller import router as repo_router
 from src.controllers.session_controller import router as session_router
 from src.controllers.github_controller import router as github_router
+from src.utils.auth import get_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -275,6 +277,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
 
     from src.db import github_db
     github_db.ensure_table()
+    notebook_db.ensure_user_id_column()
 
     try:
         _state.validator = AnswerValidator()
@@ -445,18 +448,18 @@ def _run_query(
 # ═══════════════════════════════════════════════════════════════════════════
 
 @app.post("/notebooks", status_code=status.HTTP_201_CREATED, summary="Create notebook")
-async def create_notebook(body: NotebookCreate):
-    """Create a new empty notebook."""
+async def create_notebook(body: NotebookCreate, user_id: Optional[str] = Depends(get_current_user)):
+    """Create a new empty notebook owned by the authenticated user."""
     try:
-        return notebook_service.create_notebook(body.title)
+        return notebook_service.create_notebook(body.title, user_id=user_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.get("/notebooks", summary="List notebooks")
-async def list_notebooks():
-    """Return all notebooks, most recently updated first."""
-    return notebook_service.list_notebooks()
+async def list_notebooks(user_id: Optional[str] = Depends(get_current_user)):
+    """Return notebooks for the authenticated user, most recently updated first."""
+    return notebook_service.list_notebooks(user_id=user_id)
 
 
 @app.get("/notebooks/{notebook_id}", summary="Get notebook")

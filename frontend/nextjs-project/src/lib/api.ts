@@ -1,5 +1,43 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+// ─── User identity for multi-tenancy ───
+
+let _cachedUserEmail: string | null = null;
+
+/**
+ * Retrieve the current user's email from the auth session.
+ * Caches the result so repeated calls avoid redundant async work.
+ * @returns User email or empty string if unauthenticated.
+ */
+async function getUserEmail(): Promise<string> {
+  if (_cachedUserEmail) return _cachedUserEmail;
+  try {
+    const { authClient } = await import("@/lib/auth/client");
+    const { data } = await authClient.getSession();
+    _cachedUserEmail = data?.user?.email ?? "";
+  } catch {
+    _cachedUserEmail = "";
+  }
+  return _cachedUserEmail;
+}
+
+/**
+ * Build headers with user identity for multi-tenant API requests.
+ * @param extra - Additional headers to merge
+ * @returns Combined headers including X-User-Id
+ */
+async function authedHeaders(extra?: Record<string, string>): Promise<Record<string, string>> {
+  const email = await getUserEmail();
+  const headers: Record<string, string> = { ...(extra || {}) };
+  if (email) headers["X-User-Id"] = email;
+  return headers;
+}
+
+/** Clear the cached user email (call on sign-out). */
+export function clearCachedUser(): void {
+  _cachedUserEmail = null;
+}
+
 // ─── Shared types ───
 
 export interface Source {
@@ -54,7 +92,7 @@ export interface SourceRecord {
 export async function createNotebook(title?: string): Promise<Notebook> {
   const res = await fetch(`${API_BASE}/notebooks`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: await authedHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ title: title || undefined }),
   });
   if (!res.ok) throw new Error(`Create notebook failed: ${res.status}`);
@@ -62,13 +100,17 @@ export async function createNotebook(title?: string): Promise<Notebook> {
 }
 
 export async function listNotebooks(): Promise<Notebook[]> {
-  const res = await fetch(`${API_BASE}/notebooks`);
+  const res = await fetch(`${API_BASE}/notebooks`, {
+    headers: await authedHeaders(),
+  });
   if (!res.ok) throw new Error(`List notebooks failed: ${res.status}`);
   return res.json();
 }
 
 export async function getNotebook(id: string): Promise<Notebook> {
-  const res = await fetch(`${API_BASE}/notebooks/${id}`);
+  const res = await fetch(`${API_BASE}/notebooks/${id}`, {
+    headers: await authedHeaders(),
+  });
   if (!res.ok) throw new Error(`Get notebook failed: ${res.status}`);
   return res.json();
 }
@@ -79,7 +121,7 @@ export async function updateNotebookTitle(
 ): Promise<Notebook> {
   const res = await fetch(`${API_BASE}/notebooks/${id}`, {
     method: "PATCH",
-    headers: { "Content-Type": "application/json" },
+    headers: await authedHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ title }),
   });
   if (!res.ok) throw new Error(`Update notebook failed: ${res.status}`);
@@ -87,7 +129,10 @@ export async function updateNotebookTitle(
 }
 
 export async function deleteNotebook(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/notebooks/${id}`, { method: "DELETE" });
+  const res = await fetch(`${API_BASE}/notebooks/${id}`, {
+    method: "DELETE",
+    headers: await authedHeaders(),
+  });
   if (!res.ok) throw new Error(`Delete notebook failed: ${res.status}`);
 }
 
@@ -566,7 +611,7 @@ export interface RepoQueryResult {
 export async function createRepo(remoteUrl: string, authToken?: string): Promise<Repo> {
   const res = await fetch(`${API_BASE}/repos`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: await authedHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ remote_url: remoteUrl, auth_token: authToken }),
   });
   if (!res.ok) throw new Error((await res.json()).detail || "Create repo failed");
@@ -574,19 +619,26 @@ export async function createRepo(remoteUrl: string, authToken?: string): Promise
 }
 
 export async function listRepos(): Promise<Repo[]> {
-  const res = await fetch(`${API_BASE}/repos`);
+  const res = await fetch(`${API_BASE}/repos`, {
+    headers: await authedHeaders(),
+  });
   if (!res.ok) throw new Error("List repos failed");
   return res.json();
 }
 
 export async function getRepo(repoId: string): Promise<Repo> {
-  const res = await fetch(`${API_BASE}/repos/${repoId}`);
+  const res = await fetch(`${API_BASE}/repos/${repoId}`, {
+    headers: await authedHeaders(),
+  });
   if (!res.ok) throw new Error("Get repo failed");
   return res.json();
 }
 
 export async function deleteRepo(repoId: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/repos/${repoId}`, { method: "DELETE" });
+  const res = await fetch(`${API_BASE}/repos/${repoId}`, {
+    method: "DELETE",
+    headers: await authedHeaders(),
+  });
   if (!res.ok) throw new Error("Delete repo failed");
 }
 
@@ -892,18 +944,22 @@ export interface GitHubStatus {
  * @returns Connection status with optional user info.
  */
 export async function getGitHubStatus(): Promise<GitHubStatus> {
-  const res = await fetch(`${API_BASE}/auth/github/status`);
+  const res = await fetch(`${API_BASE}/auth/github/status`, {
+    headers: await authedHeaders(),
+  });
   if (!res.ok) return { connected: false };
   return res.json();
 }
 
 /**
  * Get the URL to start the GitHub OAuth flow.
- * Opens in a new window/tab to authorize on GitHub.
+ * Appends the user email so the backend can associate the token.
  * @returns The backend redirect URL.
  */
-export function getGitHubAuthUrl(): string {
-  return `${API_BASE}/auth/github`;
+export async function getGitHubAuthUrl(): Promise<string> {
+  const email = await getUserEmail();
+  const params = email ? `?user_id=${encodeURIComponent(email)}` : "";
+  return `${API_BASE}/auth/github${params}`;
 }
 
 /**
@@ -911,7 +967,10 @@ export function getGitHubAuthUrl(): string {
  * @returns Disconnection result.
  */
 export async function disconnectGitHub(): Promise<{ disconnected: boolean }> {
-  const res = await fetch(`${API_BASE}/auth/github/disconnect`, { method: "POST" });
+  const res = await fetch(`${API_BASE}/auth/github/disconnect`, {
+    method: "POST",
+    headers: await authedHeaders(),
+  });
   if (!res.ok) throw new Error("Disconnect failed");
   return res.json();
 }

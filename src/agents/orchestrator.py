@@ -263,12 +263,17 @@ def _consolidate_sync(repo_id: str) -> None:
         repo_db.update_status(repo_id, REPO_INDEXING_STATUS_FAILED, str(exc))
 
 
-async def register_repo(remote_url: str, auth_token: Optional[str] = None) -> Dict[str, Any]:
+async def register_repo(
+    remote_url: str,
+    auth_token: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """Validate URL, register the repo, and start clone/index in the background.
 
     Args:
         remote_url:  GitHub HTTPS clone URL.
         auth_token:  Optional PAT (hashed at rest).
+        user_id:     Authenticated user email (for multi-tenancy).
 
     Returns:
         New repo dict including ``indexing_status``.
@@ -279,7 +284,7 @@ async def register_repo(remote_url: str, auth_token: Optional[str] = None) -> Di
     """
     if not validate_github_url(remote_url):
         raise ValueError(MSG_ORCHESTRATOR_INVALID_GITHUB_URL)
-    if repo_db.find_by_remote_url(remote_url) is not None:
+    if repo_db.find_by_remote_url(remote_url, user_id=user_id) is not None:
         raise RepoAlreadyExistsError(
             MSG_ORCHESTRATOR_REPO_ALREADY_REGISTERED_TEMPLATE.format(
                 remote_url=remote_url,
@@ -295,6 +300,7 @@ async def register_repo(remote_url: str, auth_token: Optional[str] = None) -> Di
         local_path,
         auth_token_hash=token_hash,
         repo_id=new_id,
+        user_id=user_id,
     )
     loop = asyncio.get_running_loop()
     fut = loop.run_in_executor(

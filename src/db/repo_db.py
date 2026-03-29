@@ -20,6 +20,8 @@ TABLE = "repos"
 def ensure_table() -> None:
     """Create the ``repos`` table and indexes if they do not exist.
 
+    Also adds the ``user_id`` column for multi-tenancy if missing.
+
     Raises:
         RuntimeError: If table creation fails.
     """
@@ -49,6 +51,20 @@ def ensure_table() -> None:
                 CREATE INDEX IF NOT EXISTS idx_repos_status
                 ON {TABLE}(indexing_status)
             """)
+            cur.execute(f"""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = '{TABLE}'
+                          AND column_name = 'user_id'
+                    ) THEN
+                        ALTER TABLE {TABLE} ADD COLUMN user_id TEXT;
+                        CREATE INDEX IF NOT EXISTS idx_repos_user_id
+                            ON {TABLE}(user_id);
+                    END IF;
+                END $$;
+            """)
     logger.info("Table '%s' ensured", TABLE)
 
 
@@ -59,6 +75,7 @@ def insert(
     default_branch: str = "main",
     auth_token_hash: Optional[str] = None,
     repo_id: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Insert a new repo record and return it as a dict.
 
@@ -69,6 +86,7 @@ def insert(
         default_branch:   Default branch name.
         auth_token_hash:  Hashed PAT for private repos (optional).
         repo_id:          If set, use this UUID as primary key (else DB-generated).
+        user_id:          Email of the owning user (for multi-tenancy).
 
     Returns:
         Dict with all columns of the new row.
@@ -79,21 +97,21 @@ def insert(
                 cur.execute(
                     f"""
                     INSERT INTO {TABLE}
-                        (name, remote_url, local_path, default_branch, auth_token_hash)
-                    VALUES (%s, %s, %s, %s, %s)
+                        (name, remote_url, local_path, default_branch, auth_token_hash, user_id)
+                    VALUES (%s, %s, %s, %s, %s, %s)
                     RETURNING *
                     """,
-                    (name, remote_url, local_path, default_branch, auth_token_hash),
+                    (name, remote_url, local_path, default_branch, auth_token_hash, user_id),
                 )
             else:
                 cur.execute(
                     f"""
                     INSERT INTO {TABLE}
-                        (id, name, remote_url, local_path, default_branch, auth_token_hash)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                        (id, name, remote_url, local_path, default_branch, auth_token_hash, user_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     RETURNING *
                     """,
-                    (repo_id, name, remote_url, local_path, default_branch, auth_token_hash),
+                    (repo_id, name, remote_url, local_path, default_branch, auth_token_hash, user_id),
                 )
             row = cur.fetchone()
             cols = [desc[0] for desc in cur.description]
@@ -119,20 +137,27 @@ def find_by_id(repo_id: str) -> Optional[Dict[str, Any]]:
             return dict(zip(cols, row))
 
 
-def find_by_remote_url(remote_url: str) -> Optional[Dict[str, Any]]:
-    """Fetch a repo by its remote URL.
+def find_by_remote_url(remote_url: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Fetch a repo by its remote URL, optionally scoped to a user.
 
     Args:
         remote_url: GitHub clone URL.
+        user_id:    If set, restrict to this user's repos.
 
     Returns:
         Dict with all columns, or ``None`` if not found.
     """
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                f"SELECT * FROM {TABLE} WHERE remote_url = %s", (remote_url,),
-            )
+            if user_id:
+                cur.execute(
+                    f"SELECT * FROM {TABLE} WHERE remote_url = %s AND (user_id = %s OR user_id IS NULL)",
+                    (remote_url, user_id),
+                )
+            else:
+                cur.execute(
+                    f"SELECT * FROM {TABLE} WHERE remote_url = %s", (remote_url,),
+                )
             row = cur.fetchone()
             if row is None:
                 return None
@@ -140,17 +165,29 @@ def find_by_remote_url(remote_url: str) -> Optional[Dict[str, Any]]:
             return dict(zip(cols, row))
 
 
-def list_all() -> List[Dict[str, Any]]:
-    """Return all repos ordered by creation date descending.
+def list_all(user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Return repos ordered by creation date descending.
+
+    When ``user_id`` is provided, only repos owned by that user
+    (or unowned legacy repos) are returned.
+
+    Args:
+        user_id: If set, filter to this user's repos.
 
     Returns:
         List of dicts, one per repo.
     """
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                f"SELECT * FROM {TABLE} ORDER BY created_at DESC",
-            )
+            if user_id:
+                cur.execute(
+                    f"SELECT * FROM {TABLE} WHERE user_id = %s OR user_id IS NULL ORDER BY created_at DESC",
+                    (user_id,),
+                )
+            else:
+                cur.execute(
+                    f"SELECT * FROM {TABLE} ORDER BY created_at DESC",
+                )
             cols = [desc[0] for desc in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
 

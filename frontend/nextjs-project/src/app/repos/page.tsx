@@ -7,7 +7,11 @@ import {
   listRepos,
   createRepo,
   deleteRepo,
+  getGitHubStatus,
+  getGitHubAuthUrl,
+  disconnectGitHub,
   type Repo,
+  type GitHubStatus,
 } from '@/lib/api';
 import { useToast } from '@/components/ui/toast';
 import { authClient } from '@/lib/auth/client';
@@ -228,6 +232,14 @@ function ReposPageInner() {
   const [repoUrl, setRepoUrl] = useState('');
   const [authToken, setAuthToken] = useState('');
   const [adding, setAdding] = useState(false);
+
+  const [ghStatus, setGhStatus] = useState<GitHubStatus>({ connected: false });
+  useEffect(() => {
+    getGitHubStatus().then(setGhStatus).catch(() => {});
+    const onFocus = () => { getGitHubStatus().then(setGhStatus).catch(() => {}); };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, []);
 
   const SORT_OPTIONS: { key: typeof sort; label: string }[] = [
     { key: 'recent', label: 'Most recent' },
@@ -474,6 +486,53 @@ function ReposPageInner() {
               </div>
             )}
           </div>
+
+          {ghStatus.connected ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 0, borderRadius: 6, border: '1px solid rgba(255,255,255,0.1)', overflow: 'hidden' }}>
+              <span style={{
+                display: 'inline-flex', alignItems: 'center', gap: 4,
+                fontSize: 11, color: 'rgba(255,255,255,0.45)',
+                padding: '5px 10px',
+                background: 'rgba(255,255,255,0.03)',
+                letterSpacing: '0.02em',
+              }}>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.374 0 0 5.373 0 12c0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.509 11.509 0 0112 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z"/></svg>
+                @{ghStatus.github_user}
+              </span>
+              <button
+                onClick={async () => { await disconnectGitHub(); setGhStatus({ connected: false }); toastSuccess('GitHub disconnected'); }}
+                style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  width: 26, height: 26, padding: 0,
+                  background: 'none', border: 'none', borderLeft: '1px solid rgba(255,255,255,0.08)',
+                  color: 'rgba(255,255,255,0.25)', cursor: 'pointer',
+                  transition: 'color 0.15s, background 0.15s',
+                }}
+                title="Disconnect GitHub"
+                onMouseEnter={e => { e.currentTarget.style.color = '#ef4444'; e.currentTarget.style.background = 'rgba(239,68,68,0.08)'; }}
+                onMouseLeave={e => { e.currentTarget.style.color = 'rgba(255,255,255,0.25)'; e.currentTarget.style.background = 'none'; }}
+              >
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={async () => { const url = await getGitHubAuthUrl(); window.open(url, "github-auth", "width=600,height=700"); }}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                fontSize: 11, color: 'rgba(255,255,255,0.45)',
+                background: 'none', border: '1px solid rgba(255,255,255,0.1)',
+                borderRadius: 6, padding: '5px 10px',
+                cursor: 'pointer', fontFamily: 'inherit',
+                transition: 'border-color 0.15s, color 0.15s',
+              }}
+              onMouseEnter={e => { e.currentTarget.style.borderColor = 'rgba(255,255,255,0.25)'; e.currentTarget.style.color = 'rgba(255,255,255,0.7)'; }}
+              onMouseLeave={e => { e.currentTarget.style.borderColor = 'rgba(255,255,255,0.1)'; e.currentTarget.style.color = 'rgba(255,255,255,0.45)'; }}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.374 0 0 5.373 0 12c0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.509 11.509 0 0112 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z"/></svg>
+              Connect GitHub
+            </button>
+          )}
 
           <button onClick={() => setAddOpen(true)} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 14px', background: '#fff', border: 'none', borderRadius: 6, color: '#000', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit', letterSpacing: '-0.01em', transition: 'background 0.15s, transform 0.15s, box-shadow 0.15s' }}>
             <svg width="11" height="11" fill="none" stroke="currentColor" viewBox="0 0 24 24">

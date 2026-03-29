@@ -16,12 +16,40 @@ from src.db.connection import get_connection
 logger = logging.getLogger(__name__)
 
 
-def create_notebook(title: str = "Untitled notebook") -> Dict:
+def ensure_user_id_column() -> None:
+    """Add ``user_id`` TEXT column to notebooks if missing.
+
+    Raises:
+        psycopg2.Error: If DDL execution fails.
+    """
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'notebooks'
+                          AND column_name = 'user_id'
+                    ) THEN
+                        ALTER TABLE notebooks ADD COLUMN user_id TEXT;
+                        CREATE INDEX IF NOT EXISTS idx_notebooks_user_id
+                            ON notebooks(user_id);
+                    END IF;
+                END $$;
+                """
+            )
+    logger.info("Ensured 'user_id' column on notebooks table")
+
+
+def create_notebook(title: str = "Untitled notebook", user_id: Optional[str] = None) -> Dict:
     """
     Insert a new notebook row.
 
     Args:
-        title: Display title for the notebook.
+        title:   Display title for the notebook.
+        user_id: Email of the owning user (for multi-tenancy).
 
     Returns:
         Dict with id, title, created_at, updated_at.
@@ -30,39 +58,59 @@ def create_notebook(title: str = "Untitled notebook") -> Dict:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO notebooks (title)
-                VALUES (%s)
+                INSERT INTO notebooks (title, user_id)
+                VALUES (%s, %s)
                 RETURNING id, title, created_at, updated_at
                 """,
-                (title,),
+                (title, user_id),
             )
             row = cur.fetchone()
     return _row_to_dict(row)
 
 
-def list_notebooks() -> List[Dict]:
+def list_notebooks(user_id: Optional[str] = None) -> List[Dict]:
     """
-    Return all notebooks ordered by most-recently updated first.
+    Return notebooks ordered by most-recently updated first.
 
-    Each dict includes a ``source_count`` derived from the sources table.
+    When ``user_id`` is provided, only notebooks owned by that user
+    (or unowned legacy notebooks) are returned.
+
+    Args:
+        user_id: If set, filter to this user's notebooks.
 
     Returns:
         List of notebook dicts.
     """
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT n.id, n.title, n.created_at, n.updated_at,
-                       COALESCE(s.cnt, 0) AS source_count
-                FROM notebooks n
-                LEFT JOIN (
-                    SELECT notebook_id, COUNT(*) AS cnt
-                    FROM sources GROUP BY notebook_id
-                ) s ON s.notebook_id = n.id
-                ORDER BY n.updated_at DESC
-                """
-            )
+            if user_id:
+                cur.execute(
+                    """
+                    SELECT n.id, n.title, n.created_at, n.updated_at,
+                           COALESCE(s.cnt, 0) AS source_count
+                    FROM notebooks n
+                    LEFT JOIN (
+                        SELECT notebook_id, COUNT(*) AS cnt
+                        FROM sources GROUP BY notebook_id
+                    ) s ON s.notebook_id = n.id
+                    WHERE n.user_id = %s OR n.user_id IS NULL
+                    ORDER BY n.updated_at DESC
+                    """,
+                    (user_id,),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT n.id, n.title, n.created_at, n.updated_at,
+                           COALESCE(s.cnt, 0) AS source_count
+                    FROM notebooks n
+                    LEFT JOIN (
+                        SELECT notebook_id, COUNT(*) AS cnt
+                        FROM sources GROUP BY notebook_id
+                    ) s ON s.notebook_id = n.id
+                    ORDER BY n.updated_at DESC
+                    """
+                )
             return [
                 {
                     "id": str(r[0]),

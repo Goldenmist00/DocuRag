@@ -785,7 +785,7 @@ export default function RepoDashboard() {
             </span>
           ) : (
             <button
-              onClick={() => window.open(getGitHubAuthUrl(), "github-auth", "width=600,height=700")}
+              onClick={async () => { const url = await getGitHubAuthUrl(); window.open(url, "github-auth", "width=600,height=700"); }}
               style={{
                 fontSize: 10, color: "rgba(255,255,255,0.3)", background: "none",
                 border: "1px solid rgba(255,255,255,0.08)", borderRadius: 4,

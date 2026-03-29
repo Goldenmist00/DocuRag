@@ -12,12 +12,14 @@ Handles the OAuth authorization flow:
 
 import logging
 import os
+from typing import Optional
 
 import requests as _requests
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse
 
 from src.db import github_db
+from src.utils.auth import get_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +38,12 @@ SCOPES = "repo,read:user"
 
 
 @router.get("", summary="Start GitHub OAuth flow")
-async def github_auth_start():
+async def github_auth_start(user_id: Optional[str] = Query(None)):
     """Redirect the user to GitHub's authorization page.
+
+    Args:
+        user_id: App user email, forwarded as OAuth ``state`` so the
+                 callback can associate the token with the right user.
 
     Returns:
         RedirectResponse to GitHub OAuth.
@@ -52,25 +58,29 @@ async def github_auth_start():
         )
 
     redirect_uri = f"{BACKEND_URL}/auth/github/callback"
+    state = user_id or ""
     auth_url = (
         f"{GITHUB_AUTH_URL}"
         f"?client_id={GITHUB_CLIENT_ID}"
         f"&scope={SCOPES}"
         f"&redirect_uri={redirect_uri}"
+        f"&state={state}"
     )
     return RedirectResponse(url=auth_url)
 
 
 @router.get("/callback", summary="GitHub OAuth callback")
-async def github_auth_callback(code: str = Query(...)):
+async def github_auth_callback(code: str = Query(...), state: Optional[str] = Query(None)):
     """Exchange the authorization code for an access token.
 
     GitHub redirects here after the user authorizes. We exchange the
     ``code`` for an access token, fetch the user profile, store the
-    token, and redirect to the frontend success page.
+    token (associated with the app user via ``state``), and redirect
+    to the frontend success page.
 
     Args:
-        code: Authorization code from GitHub.
+        code:  Authorization code from GitHub.
+        state: App user email passed through OAuth state parameter.
 
     Returns:
         RedirectResponse to the frontend with connection status.
@@ -80,6 +90,8 @@ async def github_auth_callback(code: str = Query(...)):
     """
     if not GITHUB_CLIENT_ID or not GITHUB_CLIENT_SECRET:
         raise HTTPException(status_code=500, detail="GitHub OAuth not configured")
+
+    app_user_id = state if state and state.strip() else None
 
     token_resp = _requests.post(
         GITHUB_TOKEN_URL,
@@ -119,9 +131,9 @@ async def github_auth_callback(code: str = Query(...)):
     if user_resp.status_code == 200:
         github_user = user_resp.json().get("login", "unknown")
 
-    github_db.upsert_token(github_user, access_token, token_type, scope)
+    github_db.upsert_token(github_user, access_token, token_type, scope, user_id=app_user_id)
 
-    logger.info("GitHub connected: user=%s scope=%s", github_user, scope)
+    logger.info("GitHub connected: user=%s scope=%s app_user=%s", github_user, scope, app_user_id)
 
     return RedirectResponse(
         url=f"{FRONTEND_URL}/auth/github/callback?status=success&user={github_user}"
@@ -129,27 +141,37 @@ async def github_auth_callback(code: str = Query(...)):
 
 
 @router.get("/status", summary="Check GitHub connection status")
-async def github_status():
-    """Return whether a GitHub account is connected.
+async def github_status(user_id: Optional[str] = Depends(get_current_user)):
+    """Return whether a GitHub account is connected for the current user.
+
+    Args:
+        user_id: Authenticated user email (injected via dependency).
 
     Returns:
         Dict with ``connected`` flag and optional ``github_user``.
     """
-    info = github_db.get_github_user()
+    info = github_db.get_github_user(user_id=user_id)
     if info:
         return {"connected": True, **info}
     return {"connected": False}
 
 
 @router.post("/disconnect", summary="Disconnect GitHub account")
-async def github_disconnect():
-    """Remove the stored GitHub token.
+async def github_disconnect(user_id: Optional[str] = Depends(get_current_user)):
+    """Remove the stored GitHub token for the current user.
+
+    Args:
+        user_id: Authenticated user email (injected via dependency).
 
     Returns:
         Dict with ``disconnected`` flag.
     """
-    info = github_db.get_github_user()
+    if user_id:
+        deleted = github_db.delete_token(user_id=user_id)
+        if deleted:
+            return {"disconnected": True}
+    info = github_db.get_github_user(user_id=user_id)
     if info:
-        github_db.delete_token(info["github_user"])
+        github_db.delete_token(github_user=info["github_user"])
         return {"disconnected": True, "github_user": info["github_user"]}
     return {"disconnected": False, "message": "No GitHub account connected"}
