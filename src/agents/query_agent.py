@@ -44,7 +44,10 @@ steps. Never return a wall of text.
 from the provided code chunks when they help explain behavior. Always show \
 the file path above the snippet.
 3. **Diagrams**: For architecture, data-flow, or sequence questions, include a \
-Mermaid diagram (```mermaid … ```) that visualizes the relationships.
+Mermaid diagram (```mermaid … ```) that visualizes the relationships. \
+Use correct Mermaid arrow syntax: `A -->|label| B` is correct; \
+`A -->|label|> B` is INVALID and will cause parse errors. Never add a \
+trailing `>` after the label pipes.
 4. **Specificity**: Cite exact file paths (`src/foo.py`), function/class names, \
 API routes, and tech-stack components visible in the context.
 5. **Depth**: Explain *how* things work, not just *that* they exist. Walk \
@@ -67,7 +70,11 @@ Respond with a single JSON object (no markdown fences around the JSON) with:
   "answer" (string — rich markdown including headings, code blocks, and \
 mermaid diagrams as described above),
   "cited_files" (array of repo-relative path strings you relied on).
-Do not fabricate paths; every cited path must appear in the provided context."""
+Do not fabricate paths; every cited path must appear in the provided context.
+
+IMPORTANT: The "answer" value must contain ONLY your markdown response. \
+Do NOT embed a duplicate JSON object or a ```json code block containing \
+the same answer inside the markdown. Return the JSON wrapper exactly once."""
 
 
 def _ensure_generator(generator: Optional[Generator]) -> Generator:
@@ -454,6 +461,30 @@ def _build_query_prompt(
     return "\n".join(sections)
 
 
+def _sanitize_mermaid(answer: str) -> str:
+    """Fix common Mermaid syntax errors produced by LLMs.
+
+    Corrects the invalid ``-->|label|>`` arrow pattern to ``-->|label|``
+    and strips embedded JSON/markdown code blocks that duplicate the
+    answer payload.
+
+    Args:
+        answer: Markdown answer string.
+
+    Returns:
+        Sanitized answer.
+    """
+    answer = re.sub(r'-->\|([^|]*)\|>', r'-->|\1|', answer)
+
+    answer = re.sub(
+        r'```json\s*\n\s*\{\s*"answer"\s*:[\s\S]*?```',
+        '',
+        answer,
+    ).rstrip()
+
+    return answer
+
+
 def _strip_trailing_json_dupe(answer: str) -> str:
     """Remove a duplicate JSON blob the LLM sometimes appends after markdown.
 
@@ -490,11 +521,14 @@ def _parse_query_llm_output(raw: str) -> Dict[str, Any]:
     Raises:
         None.
     """
+    def _clean(text: str) -> str:
+        return _sanitize_mermaid(_strip_trailing_json_dupe(text))
+
     try:
         inner = _strip_json_fence(raw)
         data = json.loads(inner)
         if isinstance(data, dict):
-            ans = _strip_trailing_json_dupe(str(data.get("answer") or ""))
+            ans = _clean(str(data.get("answer") or ""))
             cf = data.get("cited_files")
             files = [str(x) for x in cf] if isinstance(cf, list) else []
             return {"answer": ans, "cited_files": files}
@@ -506,14 +540,14 @@ def _parse_query_llm_output(raw: str) -> Dict[str, Any]:
         try:
             data = json.loads(raw[json_match.start():])
             if isinstance(data, dict):
-                ans = _strip_trailing_json_dupe(str(data.get("answer") or ""))
+                ans = _clean(str(data.get("answer") or ""))
                 cf = data.get("cited_files")
                 files = [str(x) for x in cf] if isinstance(cf, list) else []
                 return {"answer": ans, "cited_files": files}
         except (json.JSONDecodeError, TypeError, AttributeError):
             pass
 
-    return {"answer": (raw or "").strip(), "cited_files": []}
+    return {"answer": _clean((raw or "").strip()), "cited_files": []}
 
 
 def _relevant_memories_payload(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
