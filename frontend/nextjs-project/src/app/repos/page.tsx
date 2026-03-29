@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import {
@@ -201,6 +201,14 @@ function toRepoCard(repo: Repo): RepoCard {
 }
 
 export default function ReposPage() {
+  return (
+    <Suspense>
+      <ReposPageInner />
+    </Suspense>
+  );
+}
+
+function ReposPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const notebookId = searchParams.get('notebook');
