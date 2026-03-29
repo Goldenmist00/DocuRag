@@ -149,12 +149,18 @@ def _ingest_json_headers(api_key: str) -> Dict[str, str]:
     }
 
 
-def _ingest_build_payload(model: str, messages: List[Dict[str, str]]) -> Dict[str, Any]:
+def _ingest_build_payload(
+    model: str,
+    messages: List[Dict[str, str]],
+    max_tokens: Optional[int] = INGEST_COMPLETION_MAX_TOKENS,
+) -> Dict[str, Any]:
     """Assemble the JSON body for a non-streaming chat completion.
 
     Args:
-        model:    Provider model id.
-        messages: OpenAI-style chat messages.
+        model:      Provider model id.
+        messages:   OpenAI-style chat messages.
+        max_tokens: Cap on completion tokens.  Pass ``None`` to let the
+                    provider use its full remaining context window.
 
     Returns:
         Request payload dict.
@@ -162,14 +168,16 @@ def _ingest_build_payload(model: str, messages: List[Dict[str, str]]) -> Dict[st
     Raises:
         None.
     """
-    return {
+    payload: Dict[str, Any] = {
         "model": model,
         "messages": messages,
-        "max_tokens": INGEST_COMPLETION_MAX_TOKENS,
         "temperature": INGEST_COMPLETION_TEMPERATURE,
         "top_p": INGEST_COMPLETION_TOP_P,
         "stream": False,
     }
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
+    return payload
 
 
 def _ingest_parse_non_stream_body(response: requests.Response) -> str:
@@ -253,14 +261,17 @@ def _ingest_try_provider(
     model: str,
     api_key: str,
     messages: List[Dict[str, str]],
+    max_tokens: Optional[int] = INGEST_COMPLETION_MAX_TOKENS,
 ) -> Tuple[Optional[str], Optional[Exception]]:
     """Call one provider with retries and return assistant text or failure.
 
     Args:
-        url:      Chat completions endpoint.
-        model:    Model id for that endpoint.
-        api_key:  API key for authorization.
-        messages: Chat messages for the completion.
+        url:        Chat completions endpoint.
+        model:      Model id for that endpoint.
+        api_key:    API key for authorization.
+        messages:   Chat messages for the completion.
+        max_tokens: Cap on completion tokens.  Pass ``None`` to omit the
+                    limit and let the provider use its full context window.
 
     Returns:
         Tuple of (assistant text, ``None``) on success, or (``None``, last error).
@@ -269,7 +280,7 @@ def _ingest_try_provider(
         None.
     """
     headers = _ingest_json_headers(api_key)
-    payload = _ingest_build_payload(model, messages)
+    payload = _ingest_build_payload(model, messages, max_tokens=max_tokens)
     delay = INGEST_LLM_INITIAL_BACKOFF_SECONDS
     last_error: Optional[Exception] = None
     for attempt in range(1, INGEST_LLM_MAX_RETRIES + 1):
@@ -308,12 +319,18 @@ def _ingest_try_provider(
     return None, last_error
 
 
-def _ingest_chat_completion(messages: List[Dict[str, str]], generator: Generator) -> str:
+def _ingest_chat_completion(
+    messages: List[Dict[str, str]],
+    generator: Generator,
+    max_tokens: Optional[int] = INGEST_COMPLETION_MAX_TOKENS,
+) -> str:
     """Call NVIDIA and/or Groq with retries and provider fallback (non-streaming).
 
     Args:
-        messages:  OpenAI-style chat messages (system + user).
-        generator: Existing ``Generator`` (confirms keys were validated at init).
+        messages:   OpenAI-style chat messages (system + user).
+        generator:  Existing ``Generator`` (confirms keys were validated at init).
+        max_tokens: Cap on completion tokens.  Pass ``None`` to omit the
+                    limit and let the provider use its full context window.
 
     Returns:
         Raw assistant string (expected to be JSON).
@@ -329,7 +346,7 @@ def _ingest_chat_completion(messages: List[Dict[str, str]], generator: Generator
         )
     last_error: Optional[Exception] = None
     for url, model, api_key in attempts:
-        text, err = _ingest_try_provider(url, model, api_key, messages)
+        text, err = _ingest_try_provider(url, model, api_key, messages, max_tokens=max_tokens)
         if text is not None:
             return text
         last_error = err

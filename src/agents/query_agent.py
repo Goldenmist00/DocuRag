@@ -575,7 +575,11 @@ def _relevant_memories_payload(rows: List[Dict[str, Any]]) -> List[Dict[str, Any
 
 
 def _run_query_llm(user_prompt: str, gen: Generator) -> str:
-    """Execute the query chat completion.
+    """Execute the query chat completion without a token cap.
+
+    Unlike ingest completions, query answers can be lengthy (markdown with
+    code blocks, mermaid diagrams, tables, etc.) so ``max_tokens`` is
+    omitted to let the provider use the full remaining context window.
 
     Args:
         user_prompt: Full user message from ``_build_query_prompt``.
@@ -591,7 +595,7 @@ def _run_query_llm(user_prompt: str, gen: Generator) -> str:
         {"role": "system", "content": QUERY_SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
     ]
-    return _ingest_chat_completion(messages, gen)
+    return _ingest_chat_completion(messages, gen, max_tokens=None)
 
 
 def _sort_by_importance(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
