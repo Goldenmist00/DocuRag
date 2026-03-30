@@ -2,8 +2,8 @@
 code_embedder.py
 ================
 Split source files into function-level chunks using Tree-sitter AST,
-embed them with the existing ``Embedder`` (bge-m3, 1024d), and store
-in ``repo_code_chunks`` (pgvector) for semantic code search.
+embed them with the ``Embedder`` (Gemini 768d / NVIDIA 1024d), and
+store in ``repo_code_chunks`` (pgvector) for semantic code search.
 """
 
 from __future__ import annotations

@@ -203,6 +203,43 @@ def get_dependencies(repo_id: str, source_file: str) -> List[Dict[str, Any]]:
 
 
 @retry_on_disconnect
+def get_dependencies_batch(
+    repo_id: str, source_files: List[str],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Fetch dependencies for multiple source files in a single query.
+
+    Replaces the N+1 pattern of calling ``get_dependencies`` in a loop.
+
+    Args:
+        repo_id:      Repository UUID.
+        source_files: Paths of source files to look up.
+
+    Returns:
+        Dict mapping each source_file to its list of edge dicts.
+    """
+    if not source_files:
+        return {}
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT source_file, target_file, reference_type,
+                       source_symbol, target_symbol, line_number
+                FROM {TABLE}
+                WHERE repo_id = %s AND source_file = ANY(%s)
+                """,
+                (repo_id, source_files),
+            )
+            cols = [d[0] for d in cur.description]
+            result: Dict[str, List[Dict[str, Any]]] = {}
+            for row in cur.fetchall():
+                d = dict(zip(cols, row))
+                sf = d.pop("source_file")
+                result.setdefault(sf, []).append(d)
+    return result
+
+
+@retry_on_disconnect
 def get_all_edges(repo_id: str) -> List[Dict[str, Any]]:
     """Retrieve all reference edges for a repository.
 

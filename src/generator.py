@@ -4,12 +4,14 @@ generator.py
 Phase 5 — Answer Generation
 
 Provider priority:
-  1. NVIDIA API  (meta/llama-3.3-70b-instruct)  — if NVIDIA_API_KEY is set
-  2. Groq API    (llama-3.3-70b-versatile) — if GROQ_API_KEY is set
-  3. Raises ValueError if neither key is available
+  1. Gemini API  (gemini-2.0-flash)            — if GEMINI_API_KEY is set
+  2. Groq API    (llama-3.3-70b-versatile)      — if GROQ_API_KEY is set
+  3. NVIDIA API  (meta/llama-3.3-70b-instruct)  — if NVIDIA_API_KEY is set
+  4. Raises ValueError if no key is available
 
-If NVIDIA fails at runtime, automatically falls back to Groq for that query.
-Both providers use requests + SSE streaming.
+If the primary provider fails at runtime, automatically falls back to the
+next available provider for that query.
+All providers use requests + SSE streaming.
 """
 
 import json
@@ -24,16 +26,18 @@ from typing import Dict, List, Optional
 
 import requests
 
+from src.config.llm_semaphore import LLM_SEMAPHORE
 from src.retriever import RetrievedChunk
 
 logger = logging.getLogger(__name__)
 
-_LLM_SEMAPHORE = threading.Semaphore(2)
 _LLM_LAST_CALL = threading.local()
 
-NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
+GEMINI_URL   = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+NVIDIA_URL   = "https://integrate.api.nvidia.com/v1/chat/completions"
+GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
 
+GEMINI_MODEL = "gemini-2.0-flash"
 NVIDIA_MODEL = "meta/llama-3.3-70b-instruct"
 GROQ_MODEL   = "llama-3.3-70b-versatile"
 
@@ -90,9 +94,9 @@ class AnswerResult:
 
 
 class Generator:
-    """
-    Multi-provider LLM generator (NVIDIA → Groq runtime fallback).
-    Uses requests + SSE streaming for both providers.
+    """Multi-provider LLM generator (Gemini → Groq → NVIDIA with runtime fallback).
+
+    Uses requests + SSE streaming for all providers.
     """
 
     def __init__(
@@ -109,29 +113,29 @@ class Generator:
         self.top_p = top_p
         self.max_retries = max_retries
 
-        # Detect providers
+        gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
         nvidia_key = (api_key or os.getenv("NVIDIA_API_KEY", "")).strip()
         groq_key   = os.getenv("GROQ_API_KEY", "").strip()
 
+        self._gemini_valid = bool(gemini_key)
         self._nvidia_valid = bool(nvidia_key and nvidia_key != "your_nvidia_api_key_here")
         self._groq_valid   = bool(groq_key)
 
-        if not self._nvidia_valid and not self._groq_valid:
+        if not self._gemini_valid and not self._nvidia_valid and not self._groq_valid:
             raise ValueError(
-                "No LLM API key found. Set NVIDIA_API_KEY or GROQ_API_KEY in .env"
+                "No LLM API key found. Set GEMINI_API_KEY, NVIDIA_API_KEY, or GROQ_API_KEY in .env"
             )
 
-        # Primary provider — NVIDIA, fallback to Groq
-        if self._nvidia_valid:
-            self._provider = "nvidia"
-            self._url      = NVIDIA_URL
-            self.model     = model or NVIDIA_MODEL
+        if self._gemini_valid:
+            self._provider = "gemini"
+            self._url      = GEMINI_URL
+            self.model     = model or GEMINI_MODEL
             self._headers  = {
-                "Authorization": f"Bearer {nvidia_key}",
+                "Authorization": f"Bearer {gemini_key}",
                 "Accept":        "text/event-stream",
                 "Content-Type":  "application/json",
             }
-        else:
+        elif self._groq_valid:
             self._provider = "groq"
             self._url      = GROQ_URL
             self.model     = model or GROQ_MODEL
@@ -140,19 +144,45 @@ class Generator:
                 "Accept":        "text/event-stream",
                 "Content-Type":  "application/json",
             }
-
-        # Groq fallback headers (used if NVIDIA fails mid-run)
-        self._groq_headers: Optional[Dict] = None
-        if self._nvidia_valid and self._groq_valid:
-            self._groq_headers = {
-                "Authorization": f"Bearer {groq_key}",
+        else:
+            self._provider = "nvidia"
+            self._url      = NVIDIA_URL
+            self.model     = model or NVIDIA_MODEL
+            self._headers  = {
+                "Authorization": f"Bearer {nvidia_key}",
                 "Accept":        "text/event-stream",
                 "Content-Type":  "application/json",
             }
 
+        self._fallback_chain: List[Dict] = []
+        if self._provider != "groq" and self._groq_valid:
+            self._fallback_chain.append({
+                "name": "groq",
+                "url": GROQ_URL,
+                "model": GROQ_MODEL,
+                "headers": {
+                    "Authorization": f"Bearer {groq_key}",
+                    "Accept":        "text/event-stream",
+                    "Content-Type":  "application/json",
+                },
+            })
+        if self._provider != "nvidia" and self._nvidia_valid:
+            self._fallback_chain.append({
+                "name": "nvidia",
+                "url": NVIDIA_URL,
+                "model": NVIDIA_MODEL,
+                "headers": {
+                    "Authorization": f"Bearer {nvidia_key}",
+                    "Accept":        "text/event-stream",
+                    "Content-Type":  "application/json",
+                },
+            })
+
         logger.info(
-            "Generator ready | provider=%s | model=%s | max_tokens=%d",
-            self._provider, self.model, self.max_tokens,
+            "Generator ready | provider=%s | model=%s | fallbacks=%s | max_tokens=%d",
+            self._provider, self.model,
+            [f["name"] for f in self._fallback_chain],
+            self.max_tokens,
         )
 
     # ------------------------------------------------------------------
@@ -258,10 +288,10 @@ class Generator:
             for i, chunk in enumerate(chunks, start=1)
         )
 
-    def _build_payload(self, user_prompt: str, provider: str = "") -> Dict:
-        provider = provider or self._provider
+    def _build_payload(self, user_prompt: str, model_override: Optional[str] = None) -> Dict:
+        """Build the request payload for a streaming chat completion."""
         payload: Dict = {
-            "model":       GROQ_MODEL if provider == "groq" else self.model,
+            "model":       model_override or self.model,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user",   "content": user_prompt},
@@ -271,16 +301,52 @@ class Generator:
             "top_p":       self.top_p,
             "stream":      True,
         }
-        # thinking=True adds chain-of-thought latency — disabled for speed
         return payload
 
-    def _call_api(self, user_prompt: str) -> str:
-        """
-        Call the primary LLM provider with global concurrency control.
+    def _try_provider(
+        self,
+        url: str,
+        headers: Dict,
+        payload: Dict,
+        provider_name: str,
+    ) -> Optional[str]:
+        """Attempt one provider with retries.  Returns text or None."""
+        delay = 1.5
+        for attempt in range(1, self.max_retries + 1):
+            LLM_SEMAPHORE.acquire()
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=120)
+                response.raise_for_status()
+                return self._parse_stream(response)
+            except requests.exceptions.HTTPError as exc:
+                if exc.response.status_code == 429:
+                    jitter = random.uniform(0, 1.5)
+                    backoff = delay * 2 + jitter
+                    logger.warning(
+                        "%s rate limit (attempt %d/%d) — waiting %.1fs",
+                        provider_name, attempt, self.max_retries, backoff,
+                    )
+                    if attempt < self.max_retries:
+                        time.sleep(backoff)
+                        delay *= 2
+                else:
+                    logger.warning("%s HTTP %s", provider_name, exc.response.status_code)
+                    break
+            except Exception as exc:
+                wait = delay + random.uniform(0, 1.0)
+                logger.warning(
+                    "%s attempt %d/%d failed: %s",
+                    provider_name, attempt, self.max_retries, exc,
+                )
+                if attempt < self.max_retries:
+                    time.sleep(wait)
+                    delay *= 2
+            finally:
+                LLM_SEMAPHORE.release()
+        return None
 
-        Uses a semaphore to limit concurrent API calls across all threads,
-        preventing rate-limit storms during batch processing. Falls back
-        to Groq if NVIDIA exhausts retries.
+    def _call_api(self, user_prompt: str) -> str:
+        """Call the primary LLM provider, falling back through the chain.
 
         Args:
             user_prompt: Fully formatted prompt string.
@@ -292,84 +358,22 @@ class Generator:
             RuntimeError: If all providers fail after retries.
         """
         payload = self._build_payload(user_prompt)
-        delay   = 1.5
-        last_error: Optional[Exception] = None
+        result = self._try_provider(self._url, self._headers, payload, self._provider)
+        if result is not None:
+            return result
 
-        for attempt in range(1, self.max_retries + 1):
-            _LLM_SEMAPHORE.acquire()
-            try:
-                response = requests.post(
-                    self._url,
-                    headers=self._headers,
-                    json=payload,
-                    timeout=120,
-                )
-                response.raise_for_status()
-                return self._parse_stream(response)
-            except requests.exceptions.HTTPError as exc:
-                if exc.response.status_code == 429:
-                    jitter = random.uniform(0, 1.5)
-                    backoff = delay * 2 + jitter
-                    logger.warning(
-                        "%s rate limit hit (attempt %d/%d) — waiting %.1fs",
-                        self._provider, attempt, self.max_retries, backoff,
-                    )
-                    if attempt < self.max_retries:
-                        time.sleep(backoff)
-                        delay *= 2
-                    last_error = exc
-                else:
-                    raise
-            except Exception as exc:
-                last_error = exc
-                status_code = getattr(
-                    getattr(exc, "response", None), "status_code", None,
-                )
-                if status_code == 429:
-                    retry_after = getattr(
-                        getattr(exc, "response", None), "headers", {},
-                    ).get("Retry-After")
-                    wait = float(retry_after) if retry_after else 15.0
-                    logger.warning(
-                        "%s 429 rate limit — waiting %.0fs",
-                        self._provider, wait,
-                    )
-                else:
-                    wait = delay + random.uniform(0, 1.0)
-                    logger.warning(
-                        "%s attempt %d/%d failed: %s",
-                        self._provider, attempt, self.max_retries, exc,
-                    )
-                if attempt < self.max_retries:
-                    time.sleep(wait)
-                    delay *= 2
-            finally:
-                _LLM_SEMAPHORE.release()
-
-        if self._provider == "nvidia" and self._groq_headers:
-            logger.warning("NVIDIA failed — falling back to Groq for this query")
-            groq_payload = self._build_payload(user_prompt, provider="groq")
-            _LLM_SEMAPHORE.acquire()
-            try:
-                response = requests.post(
-                    GROQ_URL,
-                    headers=self._groq_headers,
-                    json=groq_payload,
-                    timeout=60,
-                )
-                response.raise_for_status()
-                return self._parse_stream(response)
-            except Exception as exc:
-                raise RuntimeError(
-                    f"Both NVIDIA and Groq failed. Last error: {exc}"
-                ) from exc
-            finally:
-                _LLM_SEMAPHORE.release()
+        for fb in self._fallback_chain:
+            logger.warning(
+                "%s exhausted — falling back to %s", self._provider, fb["name"],
+            )
+            fb_payload = self._build_payload(user_prompt, model_override=fb["model"])
+            result = self._try_provider(fb["url"], fb["headers"], fb_payload, fb["name"])
+            if result is not None:
+                return result
 
         raise RuntimeError(
-            f"{self._provider} API failed after {self.max_retries} attempts: "
-            f"{last_error}"
-        ) from last_error
+            f"All LLM providers failed after retries (primary={self._provider})"
+        )
 
     def _parse_stream(self, response: requests.Response) -> str:
         """Consume SSE stream and concatenate content tokens."""

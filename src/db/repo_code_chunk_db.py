@@ -3,8 +3,9 @@ repo_code_chunk_db.py
 =====================
 Database operations for the ``repo_code_chunks`` table.
 
-Stores function-level code chunks with 1024-dimension vector
-embeddings for semantic search via pgvector.
+Stores function-level code chunks with vector embeddings for
+semantic search via pgvector.  Dimension is determined at runtime
+by the active embedding provider.
 
 DB layer only: SQL and adapters, no business logic.
 """
@@ -22,9 +23,29 @@ logger = logging.getLogger(__name__)
 TABLE = "repo_code_chunks"
 
 
+def _get_embed_dim() -> int:
+    """Resolve the embedding dimension from the active provider.
+
+    Returns:
+        Dimension integer (768 for Gemini, 1024 for NVIDIA).
+    """
+    try:
+        from src.embedder import get_embedder
+        return get_embedder().embedding_dim
+    except Exception:
+        import os
+        if os.getenv("GEMINI_API_KEY", "").strip():
+            return 768
+        return 1024
+
+
 @retry_on_disconnect
 def ensure_table() -> None:
     """Create ``repo_code_chunks`` table and indexes if missing.
+
+    If the table already exists but the embedding column has a
+    different vector dimension, existing embeddings are cleared and
+    the column is re-typed to match the active provider.
 
     Returns:
         None
@@ -32,6 +53,7 @@ def ensure_table() -> None:
     Raises:
         psycopg2.Error: If DDL execution fails.
     """
+    dim = _get_embed_dim()
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
@@ -45,11 +67,33 @@ def ensure_table() -> None:
                     start_line INT,
                     end_line INT,
                     content TEXT NOT NULL,
-                    embedding vector(1024),
+                    embedding vector({dim}),
                     file_hash TEXT,
                     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+
+            cur.execute("""
+                SELECT pg_catalog.format_type(atttypid, atttypmod)
+                FROM pg_attribute
+                WHERE attrelid = %s::regclass AND attname = 'embedding'
+            """, (TABLE,))
+            row = cur.fetchone()
+            if row:
+                current_type = row[0]
+                expected_type = f"vector({dim})"
+                if current_type != expected_type:
+                    logger.warning(
+                        "Embedding dim mismatch (%s -> %s) — migrating column",
+                        current_type, expected_type,
+                    )
+                    cur.execute(f"DROP INDEX IF EXISTS idx_code_chunks_embedding")
+                    cur.execute(f"UPDATE {TABLE} SET embedding = NULL")
+                    cur.execute(
+                        f"ALTER TABLE {TABLE} ALTER COLUMN embedding "
+                        f"TYPE vector({dim})"
+                    )
+
             cur.execute(f"""
                 CREATE INDEX IF NOT EXISTS idx_code_chunks_repo
                 ON {TABLE}(repo_id)
@@ -62,7 +106,7 @@ def ensure_table() -> None:
                 CREATE INDEX IF NOT EXISTS idx_code_chunks_embedding
                 ON {TABLE} USING hnsw (embedding vector_cosine_ops)
             """)
-    logger.info("Table %s ensured", TABLE)
+    logger.info("Table %s ensured (dim=%d)", TABLE, dim)
 
 
 @retry_on_disconnect
@@ -73,7 +117,7 @@ def insert_chunks(
     """Batch-insert code chunks with embeddings.
 
     Each chunk dict should contain: ``file_path``, ``content``,
-    ``embedding`` (list or numpy array of 1024 floats).
+    ``embedding`` (list or numpy array of floats matching provider dim).
     Optional: ``symbol_name``, ``chunk_type``, ``start_line``,
     ``end_line``, ``file_hash``.
 
@@ -196,7 +240,7 @@ def search_similar(
 
     Args:
         repo_id:         Repository UUID.
-        query_embedding: 1024-d query vector.
+        query_embedding: Query vector (dimension must match the column).
         limit:           Maximum results to return.
         threshold:       Maximum cosine distance (lower = more similar).
 

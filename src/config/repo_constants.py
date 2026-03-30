@@ -51,7 +51,7 @@ MAX_CONCURRENT_INGEST_WORKERS: int = 6
 MAX_CONCURRENT_SESSIONS: int = 3
 """Maximum active agent worktree sessions per repository."""
 
-LLM_SEMAPHORE_LIMIT: int = 8
+LLM_SEMAPHORE_LIMIT: int = 5
 """Global semaphore permits for concurrent LLM API calls."""
 
 # ---------------------------------------------------------------------------

@@ -32,16 +32,18 @@ from src.config.repo_constants import (
     INGEST_LLM_RETRY_JITTER_NARROW,
     INGEST_LLM_RETRY_JITTER_WIDE,
     INGEST_PARSE_FALLBACK_SNIPPET_CHARS,
-    LLM_SEMAPHORE_LIMIT,
     MAX_CONCURRENT_INGEST_WORKERS,
     MAX_FILE_SIZE_BYTES,
     NVIDIA_API_KEY_SENTINEL,
     REPO_INDEXING_STATUS_FAILED,
     REPO_INDEXING_STATUS_INDEXING,
 )
+from src.config.llm_semaphore import LLM_SEMAPHORE
 from src.db import repo_db, repo_memory_db
 from src.generator import (
     Generator,
+    GEMINI_MODEL,
+    GEMINI_URL,
     GROQ_MODEL,
     GROQ_URL,
     NVIDIA_MODEL,
@@ -51,8 +53,6 @@ from src.git.git_service import compute_file_hash
 from src.repo.repo_processor import walk_repo
 
 logger = logging.getLogger(__name__)
-
-_INGEST_LLM_SEM = threading.Semaphore(LLM_SEMAPHORE_LIMIT)
 
 INGEST_SYSTEM_PROMPT = """You are an expert software analyst. Given one source \
 file along with its structurally extracted AST data (functions, classes, \
@@ -109,24 +109,22 @@ def _posix_rel_path(rel_path: str) -> str:
 def _ingest_build_provider_attempts() -> List[Tuple[str, str, str]]:
     """Build ordered (url, model, api_key) tuples for ingest LLM calls.
 
-    Args:
-        None
+    Priority: Gemini > Groq > NVIDIA.
 
     Returns:
-        Ordered list of provider tuples (may be empty if no keys are set);
-        NVIDIA is listed before Groq when both are valid.
-
-    Raises:
-        None.
+        Ordered list of provider tuples (may be empty if no keys are set).
     """
+    gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
     nvidia_key = os.getenv("NVIDIA_API_KEY", "").strip()
     groq_key = os.getenv("GROQ_API_KEY", "").strip()
     nvidia_ok = bool(nvidia_key and nvidia_key != NVIDIA_API_KEY_SENTINEL)
     attempts: List[Tuple[str, str, str]] = []
-    if nvidia_ok:
-        attempts.append((NVIDIA_URL, NVIDIA_MODEL, nvidia_key))
+    if gemini_key:
+        attempts.append((GEMINI_URL, GEMINI_MODEL, gemini_key))
     if groq_key:
         attempts.append((GROQ_URL, GROQ_MODEL, groq_key))
+    if nvidia_ok:
+        attempts.append((NVIDIA_URL, NVIDIA_MODEL, nvidia_key))
     return attempts
 
 
@@ -249,11 +247,11 @@ def _ingest_one_attempt(
         IndexError: If ``choices`` is empty.
         json.JSONDecodeError: If the response body is not valid JSON.
     """
-    _INGEST_LLM_SEM.acquire()
+    LLM_SEMAPHORE.acquire()
     try:
         return _ingest_post_completion(url, headers, payload)
     finally:
-        _INGEST_LLM_SEM.release()
+        LLM_SEMAPHORE.release()
 
 
 def _ingest_try_provider(
@@ -324,7 +322,7 @@ def _ingest_chat_completion(
     generator: Generator,
     max_tokens: Optional[int] = INGEST_COMPLETION_MAX_TOKENS,
 ) -> str:
-    """Call NVIDIA and/or Groq with retries and provider fallback (non-streaming).
+    """Call LLM providers (Gemini → Groq → NVIDIA) with retries and fallback.
 
     Args:
         messages:   OpenAI-style chat messages (system + user).
@@ -342,7 +340,7 @@ def _ingest_chat_completion(
     attempts = _ingest_build_provider_attempts()
     if not attempts:
         raise RuntimeError(
-            "No LLM API key available for ingest (NVIDIA_API_KEY / GROQ_API_KEY)."
+            "No LLM API key available for ingest (GEMINI_API_KEY / GROQ_API_KEY / NVIDIA_API_KEY)."
         )
     last_error: Optional[Exception] = None
     for url, model, api_key in attempts:

@@ -22,7 +22,17 @@ from src.db.connection import get_connection
 logger = logging.getLogger(__name__)
 
 TABLE = "document_chunks"
-EMBEDDING_DIM = 1024
+
+
+def _default_embed_dim() -> int:
+    """Pick 768 (Gemini) or 1024 (NVIDIA) based on which API key is set."""
+    import os
+    if os.getenv("GEMINI_API_KEY", "").strip():
+        return 768
+    return 1024
+
+
+EMBEDDING_DIM = _default_embed_dim()
 
 _INSERT_BATCH = 200
 _INSERT_WORKERS = 4
@@ -198,7 +208,7 @@ def search(
     Cosine-similarity search, optionally scoped to a single notebook.
 
     Args:
-        query_embedding: 1-D float array (1024,).
+        query_embedding: 1-D float array matching the active provider dim.
         top_k:           Number of results.
         notebook_id:     If provided, only search this notebook's chunks.
 
@@ -267,8 +277,8 @@ def ensure_hnsw_index() -> None:
     Create an HNSW cosine-similarity index on the embedding column
     if one does not already exist.
 
-    pgvector HNSW supports up to 4000 dimensions; our 1024d embeddings
-    are well within this limit.  The index is maintained automatically
+    pgvector HNSW supports up to 4000 dimensions; our embeddings
+    (768d Gemini / 1024d NVIDIA) are well within this limit.  The index is maintained automatically
     on INSERT/UPDATE so it only needs to be created once.
 
     Raises:

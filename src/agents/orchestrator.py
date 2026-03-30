@@ -240,6 +240,54 @@ def _reindex_sync(repo_id: str) -> None:
         logger.warning("Post-reindex consolidation failed: %s", exc)
 
 
+def _retry_sync(repo_id: str) -> None:
+    """Retry a failed clone/index pipeline, resuming from the last successful step.
+
+    If the local clone directory already exists on disk the clone step is
+    skipped and only ingestion + consolidation are re-run.  For private
+    repos that still need cloning, the user's connected GitHub token is
+    used if available.
+
+    Args:
+        repo_id: Repository UUID.
+
+    Returns:
+        None
+
+    Raises:
+        None: Failures are recorded on the repo row as ``failed``.
+    """
+    row = _require_repo(repo_id)
+    local_path = row["local_path"]
+    remote_url = row.get("remote_url", "")
+
+    try:
+        clone_exists = os.path.isdir(local_path) and any(
+            os.scandir(local_path)
+        )
+
+        if not clone_exists:
+            auth_token = None
+            user_id = row.get("user_id")
+            if user_id:
+                from src.db import github_db
+                auth_token = github_db.get_token(user_id=user_id)
+            repo_db.update_progress(repo_id, "cloning", 0, 1, "Retrying clone…")
+            git_service.clone_repo(remote_url, repo_id, auth_token)
+            repo_db.update_progress(repo_id, "cloning", 1, 1, "Clone complete")
+
+        repo_db.update_status(repo_id, REPO_INDEXING_STATUS_INDEXING, None)
+        generator = Generator()
+        repo_memory_db.ensure_table()
+        ingest_agent.ingest_repo(repo_id, local_path, generator)
+        repo_db.update_status(repo_id, REPO_INDEXING_STATUS_CONSOLIDATING, None)
+        consolidate_agent.consolidate_repo(repo_id, generator)
+        repo_db.mark_indexed(repo_id)
+    except Exception as exc:
+        logger.exception("retry pipeline failed for %s", repo_id)
+        repo_db.update_status(repo_id, REPO_INDEXING_STATUS_FAILED, str(exc))
+
+
 def _consolidate_sync(repo_id: str) -> None:
     """Re-run consolidation for a repo (thread target).
 
@@ -351,6 +399,37 @@ async def trigger_reindex(repo_id: str) -> Dict[str, Any]:
         "repo_id": repo_id,
         "indexing_status": REPO_INDEXING_STATUS_INDEXING,
         "message": MSG_ORCHESTRATOR_REINDEX_STARTED,
+    }
+
+
+async def trigger_retry(repo_id: str) -> Dict[str, Any]:
+    """Retry a previously failed clone/index pipeline.
+
+    Resets the repo status and schedules ``_retry_sync`` which
+    intelligently skips steps that already succeeded (e.g. skips
+    cloning when the local directory already exists).
+
+    Args:
+        repo_id: Repository UUID.
+
+    Returns:
+        Status dict acknowledging the background retry.
+
+    Raises:
+        RepoNotFoundError: When the repo does not exist.
+    """
+    row = _require_repo(repo_id)
+    repo_db.update_status(repo_id, REPO_INDEXING_STATUS_INDEXING, None)
+    loop = asyncio.get_running_loop()
+    fut = loop.run_in_executor(
+        _background_pool,
+        functools.partial(_retry_sync, repo_id),
+    )
+    _schedule_done_callback(fut)
+    return {
+        "repo_id": repo_id,
+        "indexing_status": REPO_INDEXING_STATUS_INDEXING,
+        "message": "Retry started — the pipeline will resume from the last successful step.",
     }
 
 

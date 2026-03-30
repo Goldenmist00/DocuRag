@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from src.agents.ingest_agent import _ingest_chat_completion, _strip_json_fence
 from src.config.repo_constants import (
@@ -146,15 +148,13 @@ def _format_memory_batch_lines(
     if repo_id:
         try:
             from src.db import repo_reference_db
-            for r in rows:
-                fp = r.get("file_path", "")
-                if fp:
-                    deps = repo_reference_db.get_dependencies(repo_id, fp)
-                    if deps:
-                        ref_edges_by_file[fp] = [
-                            {"target_file": d["target_file"], "type": d["reference_type"]}
-                            for d in deps[:10]
-                        ]
+            file_paths = [r.get("file_path", "") for r in rows if r.get("file_path")]
+            all_deps = repo_reference_db.get_dependencies_batch(repo_id, file_paths)
+            for fp, deps in all_deps.items():
+                ref_edges_by_file[fp] = [
+                    {"target_file": d["target_file"], "type": d["reference_type"]}
+                    for d in deps[:10]
+                ]
         except Exception:
             pass
 
@@ -521,24 +521,45 @@ def consolidate_repo(repo_id: str, generator: Optional[Generator] = None) -> Dic
     pending.sort(key=_importance_value, reverse=True)
     batch_size = CONSOLIDATION_BATCH_SIZE
     total_insights = 0
-    batches = 0
+    batches_done = 0
     marked_ids: List[str] = []
     total_batches = max(1, (len(pending) + batch_size - 1) // batch_size)
-    for i in range(0, len(pending), batch_size):
-        chunk = pending[i : i + batch_size]
-        batches += 1
-        repo_db.update_progress(
-            repo_id, "consolidating", batches, total_batches + 1,
-            f"Analyzing batch {batches}/{total_batches} ({len(chunk)} files)",
-        )
+
+    chunks = [pending[i : i + batch_size] for i in range(0, len(pending), batch_size)]
+    progress_lock = threading.Lock()
+
+    def _process_batch(
+        batch_idx: int, chunk: List[Dict[str, Any]],
+    ) -> Tuple[int, List[str]]:
+        """Process a single consolidation batch (LLM call + persist)."""
         user_body = _format_memory_batch_lines(chunk, repo_id=repo_id)
         raw = _call_consolidation_llm(user_body, gen)
         insights = _parse_insights_payload(raw)
-        total_insights += _store_batch_insights(repo_id, chunk, insights)
+        n_insights = _store_batch_insights(repo_id, chunk, insights)
         ids = [str(r["id"]) for r in chunk if r.get("id")]
         if ids:
             repo_memory_db.mark_consolidated(ids)
-            marked_ids.extend(ids)
+        return n_insights, ids
+
+    max_workers = min(3, len(chunks))
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(_process_batch, idx, chunk): idx
+            for idx, chunk in enumerate(chunks)
+        }
+        for fut in as_completed(futures):
+            try:
+                n_insights, ids = fut.result()
+                with progress_lock:
+                    total_insights += n_insights
+                    marked_ids.extend(ids)
+                    batches_done += 1
+                    repo_db.update_progress(
+                        repo_id, "consolidating", batches_done, total_batches + 1,
+                        f"Analyzed batch {batches_done}/{total_batches}",
+                    )
+            except Exception:
+                logger.exception("Consolidation batch failed")
     repo_db.update_progress(
         repo_id, "consolidating", total_batches, total_batches + 1,
         "Assembling global context…",
@@ -549,7 +570,7 @@ def consolidate_repo(repo_id: str, generator: Optional[Generator] = None) -> Dic
         "Consolidation complete",
     )
     return {
-        "batches_processed": batches,
+        "batches_processed": batches_done,
         "insights_stored": total_insights,
         "memories_marked_consolidated": len(marked_ids),
         "context": ctx,

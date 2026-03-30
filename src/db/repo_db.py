@@ -8,13 +8,19 @@ All business rules live in the git and orchestrator service modules.
 """
 
 import logging
+import threading
 from typing import Any, Dict, List, Optional
+
+from cachetools import TTLCache
 
 from src.db.connection import get_connection
 
 logger = logging.getLogger(__name__)
 
 TABLE = "repos"
+
+_list_cache = TTLCache(maxsize=512, ttl=3)
+_list_cache_lock = threading.Lock()
 
 
 def ensure_table() -> None:
@@ -166,30 +172,52 @@ def find_by_remote_url(remote_url: str, user_id: Optional[str] = None) -> Option
 
 
 def list_all(user_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Return repos ordered by creation date descending.
+    """Return repos owned by ``user_id``, ordered by creation date.
 
-    When ``user_id`` is provided, only repos owned by that user
-    (or unowned legacy repos) are returned.
+    Results are cached for 3 seconds per ``user_id`` to absorb the
+    polling traffic from the frontend (500 users x 1 req/10s = 50 rps).
+    Writes call ``invalidate_list_cache`` to bust stale entries.
+
+    Returns an empty list when ``user_id`` is ``None`` to prevent
+    unauthenticated callers from seeing all repositories.
 
     Args:
-        user_id: If set, filter to this user's repos.
+        user_id: Filter to this user's repos.
 
     Returns:
         List of dicts, one per repo.
     """
+    if not user_id:
+        return []
+    with _list_cache_lock:
+        cached = _list_cache.get(user_id)
+    if cached is not None:
+        return cached
     with get_connection() as conn:
         with conn.cursor() as cur:
-            if user_id:
-                cur.execute(
-                    f"SELECT * FROM {TABLE} WHERE user_id = %s OR user_id IS NULL ORDER BY created_at DESC",
-                    (user_id,),
-                )
-            else:
-                cur.execute(
-                    f"SELECT * FROM {TABLE} ORDER BY created_at DESC",
-                )
+            cur.execute(
+                f"SELECT * FROM {TABLE} WHERE user_id = %s OR user_id IS NULL ORDER BY created_at DESC",
+                (user_id,),
+            )
             cols = [desc[0] for desc in cur.description]
-            return [dict(zip(cols, row)) for row in cur.fetchall()]
+            rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+    with _list_cache_lock:
+        _list_cache[user_id] = rows
+    return rows
+
+
+def invalidate_list_cache(user_id: Optional[str] = None) -> None:
+    """Bust the ``list_all`` cache after a write operation.
+
+    Args:
+        user_id: If set, only invalidate that user's entry.
+                 If ``None``, clear the entire cache.
+    """
+    with _list_cache_lock:
+        if user_id:
+            _list_cache.pop(user_id, None)
+        else:
+            _list_cache.clear()
 
 
 def update_status(
@@ -216,6 +244,7 @@ def update_status(
                 """,
                 (indexing_status, error_message, repo_id),
             )
+    invalidate_list_cache()
 
 
 def update_file_counts(
@@ -242,6 +271,7 @@ def update_file_counts(
                 """,
                 (total_files, indexed_files, repo_id),
             )
+    invalidate_list_cache()
 
 
 def update_progress(
@@ -266,7 +296,7 @@ def update_progress(
         total:    Total items expected in this phase.
         detail:   Human-readable detail string (e.g. current file name).
     """
-    pct = round((current / total) * 100, 1) if total > 0 else 0.0
+    pct = round((current / total) * 100) if total > 0 else 0
     updates_indexed = phase in ("ingesting", "complete")
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -295,6 +325,7 @@ def update_progress(
                     """,
                     (phase, pct, detail[:200], repo_id),
                 )
+    invalidate_list_cache()
 
 
 def mark_indexed(repo_id: str) -> None:
@@ -320,6 +351,7 @@ def mark_indexed(repo_id: str) -> None:
                 """,
                 (repo_id,),
             )
+    invalidate_list_cache()
 
 
 def delete(repo_id: str) -> bool:
@@ -334,4 +366,52 @@ def delete(repo_id: str) -> bool:
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(f"DELETE FROM {TABLE} WHERE id = %s", (repo_id,))
-            return cur.rowcount > 0
+            deleted = cur.rowcount > 0
+    if deleted:
+        invalidate_list_cache()
+    return deleted
+
+
+# ── Async variants (asyncpg) ──────────────────────────────────────────
+
+async def async_list_all(user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Async version of ``list_all`` using the asyncpg pool.
+
+    Shares the same TTL cache as the sync version.
+
+    Args:
+        user_id: Filter to this user's repos.
+
+    Returns:
+        List of repo dicts.
+    """
+    if not user_id:
+        return []
+    with _list_cache_lock:
+        cached = _list_cache.get(user_id)
+    if cached is not None:
+        return cached
+
+    from src.db.async_pool import fetch_rows
+
+    rows = await fetch_rows(
+        f"SELECT * FROM {TABLE} WHERE user_id = $1 OR user_id IS NULL ORDER BY created_at DESC",
+        user_id,
+    )
+    with _list_cache_lock:
+        _list_cache[user_id] = rows
+    return rows
+
+
+async def async_find_by_id(repo_id: str) -> Optional[Dict[str, Any]]:
+    """Async version of ``find_by_id`` using the asyncpg pool.
+
+    Args:
+        repo_id: UUID of the repo.
+
+    Returns:
+        Dict with all columns, or ``None``.
+    """
+    from src.db.async_pool import fetch_row
+
+    return await fetch_row(f"SELECT * FROM {TABLE} WHERE id = $1", repo_id)

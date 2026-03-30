@@ -7,6 +7,7 @@ import {
   listRepos,
   createRepo,
   deleteRepo,
+  retryRepo,
   getGitHubStatus,
   getGitHubAuthUrl,
   disconnectGitHub,
@@ -45,7 +46,7 @@ function StatusBadge({ status, progress }: { status: string; progress: number })
 
   const bg = isComplete ? 'rgba(34,197,94,0.1)' : isIndexing ? 'rgba(234,179,8,0.1)' : isFailed ? 'rgba(239,68,68,0.1)' : 'rgba(255,255,255,0.05)';
   const color = isComplete ? '#22c55e' : isIndexing ? '#eab308' : isFailed ? '#ef4444' : 'rgba(255,255,255,0.4)';
-  const label = isComplete ? 'Ready' : isIndexing ? `${status.charAt(0).toUpperCase() + status.slice(1)} ${progress > 0 ? `${progress}%` : ''}`.trim() : isFailed ? 'Failed' : status;
+  const label = isComplete ? 'Ready' : isIndexing ? `${status.charAt(0).toUpperCase() + status.slice(1)} ${progress > 0 ? `${Math.round(progress)}%` : ''}`.trim() : isFailed ? 'Failed' : status;
 
   return (
     <span style={{
@@ -65,15 +66,17 @@ function StatusBadge({ status, progress }: { status: string; progress: number })
   );
 }
 
-function RepoCardComponent({ repo, view, openMenu, setOpenMenu, onOpen, onDelete }: {
+function RepoCardComponent({ repo, view, openMenu, setOpenMenu, onOpen, onDelete, onRetry }: {
   repo: RepoCard;
   view: 'grid' | 'list';
   openMenu: string | null;
   setOpenMenu: (id: string | null) => void;
   onOpen: (id: string) => void;
   onDelete: (id: string) => void;
+  onRetry: (id: string) => void;
 }) {
   const [hovered, setHovered] = useState(false);
+  const isFailed = repo.status === 'failed' || repo.status === 'error';
 
   const repoNameFromUrl = (url: string): string => {
     const match = url.match(/([^/]+?)(\.git)?$/);
@@ -163,6 +166,9 @@ function RepoCardComponent({ repo, view, openMenu, setOpenMenu, onOpen, onDelete
 
       {openMenu === repo.id && (
         <div style={{ position: 'absolute', top: view === 'grid' ? 42 : 36, right: 8, zIndex: 100, background: '#111', border: '1px solid #222', borderRadius: 8, padding: 4, boxShadow: '0 8px 24px rgba(0,0,0,0.5)', minWidth: 140 }}>
+          {isFailed && (
+            <DropdownItem label="Retry" icon="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" onClick={() => onRetry(repo.id)} />
+          )}
           <DropdownItem label="Delete" icon="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" isDelete onClick={() => onDelete(repo.id)} />
         </div>
       )}
@@ -268,7 +274,7 @@ function ReposPageInner() {
         const raw = await listRepos();
         setRepos(raw.map(toRepoCard));
       } catch { /* ignore */ }
-    }, 5000);
+    }, 10_000);
     return () => clearInterval(interval);
   }, []);
 
@@ -311,6 +317,18 @@ function ReposPageInner() {
       toastSuccess(`"${name}" deleted`);
     } catch {
       toastError(`Failed to delete "${name}"`);
+    }
+  };
+
+  const handleRetry = async (id: string) => {
+    const name = repos.find(r => r.id === id)?.name ?? 'Repository';
+    try {
+      await retryRepo(id);
+      setRepos(prev => prev.map(r => r.id === id ? { ...r, status: 'indexing', progress: 0, detail: 'Retrying…' } : r));
+      setOpenMenu(null);
+      toastSuccess(`Retrying "${name}"…`);
+    } catch {
+      toastError(`Failed to retry "${name}"`);
     }
   };
 
@@ -568,7 +586,7 @@ function ReposPageInner() {
           <div style={view === 'grid' ? { display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 } : { display: 'flex', flexDirection: 'column', gap: 6 }}>
             <AddRepoCard view={view} onAdd={() => setAddOpen(true)} />
             {filtered.map(repo => (
-              <RepoCardComponent key={repo.id} repo={repo} view={view} openMenu={openMenu} setOpenMenu={setOpenMenu} onOpen={handleOpen} onDelete={handleDelete} />
+              <RepoCardComponent key={repo.id} repo={repo} view={view} openMenu={openMenu} setOpenMenu={setOpenMenu} onOpen={handleOpen} onDelete={handleDelete} onRetry={handleRetry} />
             ))}
           </div>
         )}

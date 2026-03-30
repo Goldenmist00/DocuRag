@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -584,7 +585,7 @@ class CodingAgent:
             self.conversation.append(
                 {
                     "role": "tool",
-                    "tool_call_id": call.get("id") or "",
+                    "tool_call_id": call.get("id") or f"call_{uuid.uuid4().hex[:8]}",
                     "content": _format_tool_result(result),
                 }
             )
@@ -667,7 +668,7 @@ class CodingAgent:
             self.conversation.append(
                 {
                     "role": "tool",
-                    "tool_call_id": call.get("id") or "",
+                    "tool_call_id": call.get("id") or f"call_{uuid.uuid4().hex[:8]}",
                     "content": _format_tool_result(result),
                 }
             )
@@ -695,7 +696,7 @@ class CodingAgent:
                 self.conversation.append(
                     {
                         "role": "tool",
-                        "tool_call_id": call.get("id") or "",
+                        "tool_call_id": call.get("id") or f"call_{uuid.uuid4().hex[:8]}",
                         "content": _format_tool_result(fail_result),
                     }
                 )
@@ -720,7 +721,7 @@ class CodingAgent:
                 self.conversation.append(
                     {
                         "role": "tool",
-                        "tool_call_id": call.get("id") or "",
+                        "tool_call_id": call.get("id") or f"call_{uuid.uuid4().hex[:8]}",
                         "content": _format_tool_result(fail_result),
                     }
                 )
@@ -734,7 +735,7 @@ class CodingAgent:
             self.conversation.append(
                 {
                     "role": "tool",
-                    "tool_call_id": call.get("id") or "",
+                    "tool_call_id": call.get("id") or f"call_{uuid.uuid4().hex[:8]}",
                     "content": _format_tool_result(result),
                 }
             )

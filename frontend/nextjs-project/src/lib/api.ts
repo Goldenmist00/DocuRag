@@ -648,6 +648,18 @@ export async function reindexRepo(repoId: string): Promise<void> {
 }
 
 /**
+ * Retry a failed clone/index pipeline, resuming from the last successful step.
+ * @param repoId - UUID of the repo
+ */
+export async function retryRepo(repoId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/repos/${repoId}/retry`, {
+    method: "POST",
+    headers: await authedHeaders(),
+  });
+  if (!res.ok) throw new Error("Retry failed");
+}
+
+/**
  * Re-run the consolidation agent to refresh the global context for a repo.
  * Useful when indexing succeeded but consolidation failed.
  * @param repoId - UUID of the repo

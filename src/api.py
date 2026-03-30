@@ -68,7 +68,7 @@ from services import summaryService, quizService, mindMapService, flashcardServi
 from src.controllers.repo_controller import router as repo_router
 from src.controllers.session_controller import router as session_router
 from src.controllers.github_controller import router as github_router
-from src.utils.auth import get_current_user
+from src.utils.auth import require_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -289,6 +289,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     _state.source_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="source")
     _state.batch_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="batch")
 
+    from src.db.async_pool import init_async_pool
+    try:
+        await init_async_pool()
+        logger.info("Async DB pool initialised")
+    except Exception as exc:
+        logger.warning("Async DB pool init failed (falling back to sync): %s", exc)
+
     api_key = os.getenv("NVIDIA_API_KEY", "").strip()
     if api_key:
         gen_cfg = cfg.get("generation", {})
@@ -305,6 +312,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
 
     logger.info("API startup complete")
     yield
+
+    from src.db.async_pool import close_async_pool
+    await close_async_pool()
 
     if _state.batch_pool:
         _state.batch_pool.shutdown(wait=True)
@@ -448,7 +458,7 @@ def _run_query(
 # ═══════════════════════════════════════════════════════════════════════════
 
 @app.post("/notebooks", status_code=status.HTTP_201_CREATED, summary="Create notebook")
-async def create_notebook(body: NotebookCreate, user_id: Optional[str] = Depends(get_current_user)):
+async def create_notebook(body: NotebookCreate, user_id: str = Depends(require_current_user)):
     """Create a new empty notebook owned by the authenticated user."""
     try:
         return notebook_service.create_notebook(body.title, user_id=user_id)
@@ -457,9 +467,14 @@ async def create_notebook(body: NotebookCreate, user_id: Optional[str] = Depends
 
 
 @app.get("/notebooks", summary="List notebooks")
-async def list_notebooks(user_id: Optional[str] = Depends(get_current_user)):
+async def list_notebooks(user_id: str = Depends(require_current_user)):
     """Return notebooks for the authenticated user, most recently updated first."""
-    return notebook_service.list_notebooks(user_id=user_id)
+    from src.db import notebook_db as nb_db
+
+    try:
+        return await nb_db.async_list_notebooks(user_id=user_id)
+    except RuntimeError:
+        return notebook_service.list_notebooks(user_id=user_id)
 
 
 @app.get("/notebooks/{notebook_id}", summary="Get notebook")

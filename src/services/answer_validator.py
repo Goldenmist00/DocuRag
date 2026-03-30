@@ -27,8 +27,10 @@ from src.retriever import RetrievedChunk
 
 logger = logging.getLogger(__name__)
 
+_GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 _NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 _GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+_GEMINI_MODEL = "gemini-2.0-flash"
 _NVIDIA_MODEL = "meta/llama-3.3-70b-instruct"
 _GROQ_MODEL = "llama-3.3-70b-versatile"
 
@@ -91,14 +93,15 @@ class AnswerValidator:
     """
 
     def __init__(self) -> None:
+        gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
         nvidia_key = os.getenv("NVIDIA_API_KEY", "").strip()
         groq_key = os.getenv("GROQ_API_KEY", "").strip()
 
-        if nvidia_key and nvidia_key != "your_nvidia_api_key_here":
-            self._url = _NVIDIA_URL
-            self._model = _NVIDIA_MODEL
+        if gemini_key:
+            self._url = _GEMINI_URL
+            self._model = _GEMINI_MODEL
             self._headers = {
-                "Authorization": f"Bearer {nvidia_key}",
+                "Authorization": f"Bearer {gemini_key}",
                 "Content-Type": "application/json",
             }
         elif groq_key:
@@ -106,6 +109,13 @@ class AnswerValidator:
             self._model = _GROQ_MODEL
             self._headers = {
                 "Authorization": f"Bearer {groq_key}",
+                "Content-Type": "application/json",
+            }
+        elif nvidia_key and nvidia_key != "your_nvidia_api_key_here":
+            self._url = _NVIDIA_URL
+            self._model = _NVIDIA_MODEL
+            self._headers = {
+                "Authorization": f"Bearer {nvidia_key}",
                 "Content-Type": "application/json",
             }
         else:

@@ -11,7 +11,6 @@ import json
 import logging
 import os
 import random
-import threading
 import time
 from typing import Any, Optional
 
@@ -24,15 +23,13 @@ from src.config.repo_constants import (
     INGEST_COMPLETION_TEMPERATURE,
     INGEST_COMPLETION_TOP_P,
     INGEST_HTTP_TIMEOUT_SECONDS,
-    LLM_SEMAPHORE_LIMIT,
     MAX_AGENT_TURNS,
     NVIDIA_API_KEY_SENTINEL,
 )
-from src.generator import GROQ_MODEL, GROQ_URL, NVIDIA_MODEL, NVIDIA_URL
+from src.config.llm_semaphore import LLM_SEMAPHORE
+from src.generator import GEMINI_MODEL, GEMINI_URL, GROQ_MODEL, GROQ_URL, NVIDIA_MODEL, NVIDIA_URL
 
 logger = logging.getLogger(__name__)
-
-_LLM_SEMAPHORE = threading.Semaphore(LLM_SEMAPHORE_LIMIT)
 
 
 def _nvidia_key_valid(raw: str) -> bool:
@@ -174,10 +171,27 @@ def _request_json_with_429_retries(
                 time.sleep(wait)
                 delay *= 2
             continue
+        if resp.status_code >= 400:
+            body_preview = (resp.text or "")[:500]
+            logger.warning(
+                "LLM API %d from %s: %s", resp.status_code, url, body_preview,
+            )
         resp.raise_for_status()
         return resp.json()
     assert last_exc is not None
     raise last_exc
+
+
+def _gemini_key_valid(raw: str) -> bool:
+    """Return True if *raw* is a non-empty Gemini API key.
+
+    Args:
+        raw: Value from ``GEMINI_API_KEY``.
+
+    Returns:
+        Whether Gemini requests should be attempted.
+    """
+    return bool((raw or "").strip())
 
 
 def _dispatch_chat_providers(
@@ -186,7 +200,7 @@ def _dispatch_chat_providers(
     nvidia_key: str,
     groq_key: str,
 ) -> dict[str, Any]:
-    """Try NVIDIA then Groq for a chat completion (no semaphore).
+    """Try Gemini, then Groq, then NVIDIA for a chat completion.
 
     Args:
         messages: OpenAI-style message list.
@@ -198,10 +212,41 @@ def _dispatch_chat_providers(
         Parsed JSON response dict.
 
     Raises:
-        RuntimeError: If NVIDIA fails and Groq is not configured.
+        RuntimeError: If all providers fail.
         requests.HTTPError: On non-retryable HTTP errors.
         ValueError: If JSON decoding of the response body fails.
     """
+    gemini_key = os.getenv("GEMINI_API_KEY", "")
+    last_exc: Optional[Exception] = None
+
+    if _gemini_key_valid(gemini_key):
+        headers = {
+            "Authorization": f"Bearer {gemini_key.strip()}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        try:
+            return _request_json_with_429_retries(
+                GEMINI_URL, headers, GEMINI_MODEL, messages, tools_payload
+            )
+        except Exception as exc:
+            logger.warning("Gemini chat completion failed: %s", exc)
+            last_exc = exc
+
+    if _groq_key_valid(groq_key):
+        headers = {
+            "Authorization": f"Bearer {groq_key.strip()}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        try:
+            return _request_json_with_429_retries(
+                GROQ_URL, headers, GROQ_MODEL, messages, tools_payload
+            )
+        except Exception as exc:
+            logger.warning("Groq chat completion failed: %s", exc)
+            last_exc = exc
+
     if _nvidia_key_valid(nvidia_key):
         headers = {
             "Authorization": f"Bearer {nvidia_key.strip()}",
@@ -214,19 +259,11 @@ def _dispatch_chat_providers(
             )
         except Exception as exc:
             logger.warning("NVIDIA chat completion failed: %s", exc)
-            if not _groq_key_valid(groq_key):
-                raise RuntimeError(
-                    "NVIDIA request failed and Groq key is not set."
-                ) from exc
-    if _groq_key_valid(groq_key):
-        headers = {
-            "Authorization": f"Bearer {groq_key.strip()}",
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        }
-        return _request_json_with_429_retries(
-            GROQ_URL, headers, GROQ_MODEL, messages, tools_payload
-        )
+            last_exc = exc
+
+    raise RuntimeError(
+        f"All LLM providers failed. Last error: {last_exc}"
+    )
 
 
 def chat_completion(messages: list, tools: list = None) -> dict:
@@ -246,9 +283,10 @@ def chat_completion(messages: list, tools: list = None) -> dict:
     """
     nvidia_key = os.getenv("NVIDIA_API_KEY", "")
     groq_key = os.getenv("GROQ_API_KEY", "")
-    if not _nvidia_key_valid(nvidia_key) and not _groq_key_valid(groq_key):
+    gemini_key = os.getenv("GEMINI_API_KEY", "")
+    if not _gemini_key_valid(gemini_key) and not _nvidia_key_valid(nvidia_key) and not _groq_key_valid(groq_key):
         raise ValueError(
-            "No LLM API key found. Set NVIDIA_API_KEY or GROQ_API_KEY in the environment."
+            "No LLM API key found. Set GEMINI_API_KEY, NVIDIA_API_KEY, or GROQ_API_KEY."
         )
     tools_payload = _tools_api_payload(tools)
     if len(messages) > MAX_AGENT_TURNS * 4:
@@ -257,11 +295,11 @@ def chat_completion(messages: list, tools: list = None) -> dict:
             len(messages),
             MAX_AGENT_TURNS,
         )
-    _LLM_SEMAPHORE.acquire()
+    LLM_SEMAPHORE.acquire()
     try:
         return _dispatch_chat_providers(messages, tools_payload, nvidia_key, groq_key)
     finally:
-        _LLM_SEMAPHORE.release()
+        LLM_SEMAPHORE.release()
 
 
 def extract_tool_calls(response: dict) -> list:

@@ -7,13 +7,18 @@ Every function accepts/returns plain dicts — no business logic here.
 """
 
 import logging
+import threading
 from typing import Any, Dict, List, Optional
 
+from cachetools import TTLCache
 from psycopg2.extras import Json
 
 from src.db.connection import get_connection
 
 logger = logging.getLogger(__name__)
+
+_nb_list_cache = TTLCache(maxsize=512, ttl=3)
+_nb_list_lock = threading.Lock()
 
 
 def ensure_user_id_column() -> None:
@@ -69,49 +74,42 @@ def create_notebook(title: str = "Untitled notebook", user_id: Optional[str] = N
 
 
 def list_notebooks(user_id: Optional[str] = None) -> List[Dict]:
-    """
-    Return notebooks ordered by most-recently updated first.
+    """Return notebooks owned by ``user_id``, most-recently updated first.
 
-    When ``user_id`` is provided, only notebooks owned by that user
-    (or unowned legacy notebooks) are returned.
+    Results are cached for 3 seconds per user to absorb polling traffic.
+
+    Returns an empty list when ``user_id`` is ``None`` to prevent
+    unauthenticated callers from seeing all notebooks.
 
     Args:
-        user_id: If set, filter to this user's notebooks.
+        user_id: Filter to this user's notebooks.
 
     Returns:
         List of notebook dicts.
     """
+    if not user_id:
+        return []
+    with _nb_list_lock:
+        cached = _nb_list_cache.get(user_id)
+    if cached is not None:
+        return cached
     with get_connection() as conn:
         with conn.cursor() as cur:
-            if user_id:
-                cur.execute(
-                    """
-                    SELECT n.id, n.title, n.created_at, n.updated_at,
-                           COALESCE(s.cnt, 0) AS source_count
-                    FROM notebooks n
-                    LEFT JOIN (
-                        SELECT notebook_id, COUNT(*) AS cnt
-                        FROM sources GROUP BY notebook_id
-                    ) s ON s.notebook_id = n.id
-                    WHERE n.user_id = %s OR n.user_id IS NULL
-                    ORDER BY n.updated_at DESC
-                    """,
-                    (user_id,),
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT n.id, n.title, n.created_at, n.updated_at,
-                           COALESCE(s.cnt, 0) AS source_count
-                    FROM notebooks n
-                    LEFT JOIN (
-                        SELECT notebook_id, COUNT(*) AS cnt
-                        FROM sources GROUP BY notebook_id
-                    ) s ON s.notebook_id = n.id
-                    ORDER BY n.updated_at DESC
-                    """
-                )
-            return [
+            cur.execute(
+                """
+                SELECT n.id, n.title, n.created_at, n.updated_at,
+                       COALESCE(s.cnt, 0) AS source_count
+                FROM notebooks n
+                LEFT JOIN (
+                    SELECT notebook_id, COUNT(*) AS cnt
+                    FROM sources GROUP BY notebook_id
+                ) s ON s.notebook_id = n.id
+                WHERE n.user_id = %s OR n.user_id IS NULL
+                ORDER BY n.updated_at DESC
+                """,
+                (user_id,),
+            )
+            rows = [
                 {
                     "id": str(r[0]),
                     "title": r[1],
@@ -121,6 +119,22 @@ def list_notebooks(user_id: Optional[str] = None) -> List[Dict]:
                 }
                 for r in cur.fetchall()
             ]
+    with _nb_list_lock:
+        _nb_list_cache[user_id] = rows
+    return rows
+
+
+def invalidate_notebook_cache(user_id: Optional[str] = None) -> None:
+    """Bust the ``list_notebooks`` cache after a write.
+
+    Args:
+        user_id: If set, only invalidate that user's entry.
+    """
+    with _nb_list_lock:
+        if user_id:
+            _nb_list_cache.pop(user_id, None)
+        else:
+            _nb_list_cache.clear()
 
 
 def get_notebook(notebook_id: str) -> Optional[Dict]:
@@ -304,3 +318,54 @@ def _row_to_dict(row) -> Dict:
         "created_at": row[2].isoformat() if row[2] else None,
         "updated_at": row[3].isoformat() if row[3] else None,
     }
+
+
+# ── Async variants (asyncpg) ──────────────────────────────────────────
+
+async def async_list_notebooks(user_id: Optional[str] = None) -> List[Dict]:
+    """Async version of ``list_notebooks``.
+
+    Shares the same TTL cache as the sync version.
+
+    Args:
+        user_id: Filter to this user's notebooks.
+
+    Returns:
+        List of notebook dicts.
+    """
+    if not user_id:
+        return []
+    with _nb_list_lock:
+        cached = _nb_list_cache.get(user_id)
+    if cached is not None:
+        return cached
+
+    from src.db.async_pool import fetch_rows
+
+    rows = await fetch_rows(
+        """
+        SELECT n.id, n.title, n.created_at, n.updated_at,
+               COALESCE(s.cnt, 0) AS source_count
+        FROM notebooks n
+        LEFT JOIN (
+            SELECT notebook_id, COUNT(*) AS cnt
+            FROM sources GROUP BY notebook_id
+        ) s ON s.notebook_id = n.id
+        WHERE n.user_id = $1 OR n.user_id IS NULL
+        ORDER BY n.updated_at DESC
+        """,
+        user_id,
+    )
+    result = [
+        {
+            "id": str(r["id"]),
+            "title": r["title"],
+            "created_at": r["created_at"].isoformat() if r.get("created_at") else None,
+            "updated_at": r["updated_at"].isoformat() if r.get("updated_at") else None,
+            "source_count": r.get("source_count", 0),
+        }
+        for r in rows
+    ]
+    with _nb_list_lock:
+        _nb_list_cache[user_id] = result
+    return result

@@ -5,11 +5,16 @@ Shared PostgreSQL connection pool used by all DB service modules.
 
 Provides a single ``get_pool()`` accessor that lazily creates a
 ``ThreadedConnectionPool`` on first call and reuses it afterward.
+
+A ``threading.Semaphore`` gates ``get_connection()`` so that callers
+**block** instead of crashing when all connections are in use
+(``psycopg2``'s pool raises immediately on exhaustion).
 """
 
 import functools
 import logging
 import os
+import threading
 import time
 from contextlib import contextmanager
 from typing import Generator, Optional
@@ -23,15 +28,17 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 _pool: Optional[pool.ThreadedConnectionPool] = None
+_conn_semaphore: Optional[threading.Semaphore] = None
+
+_DB_POOL_MAX = int(os.environ.get("DB_POOL_MAX_CONN", "20"))
+_DB_POOL_MIN = int(os.environ.get("DB_POOL_MIN_CONN", "2"))
 
 
-def get_pool(min_conn: int = 1, max_conn: int = 5) -> pool.ThreadedConnectionPool:
-    """
-    Return the shared connection pool, creating it on first call.
+def get_pool() -> pool.ThreadedConnectionPool:
+    """Return the shared connection pool, creating it on first call.
 
-    Reads credentials from environment variables:
-        POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB,
-        POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_SSLMODE
+    Pool size is controlled by env vars ``DB_POOL_MIN_CONN`` (default 2)
+    and ``DB_POOL_MAX_CONN`` (default 20).
 
     Returns:
         ThreadedConnectionPool instance.
@@ -39,7 +46,7 @@ def get_pool(min_conn: int = 1, max_conn: int = 5) -> pool.ThreadedConnectionPoo
     Raises:
         RuntimeError: If POSTGRES_PASSWORD is not set or connection fails.
     """
-    global _pool
+    global _pool, _conn_semaphore
     if _pool is not None:
         return _pool
 
@@ -61,24 +68,29 @@ def get_pool(min_conn: int = 1, max_conn: int = 5) -> pool.ThreadedConnectionPoo
         "keepalives_count":    3,
     }
 
-    _pool = pool.ThreadedConnectionPool(min_conn, max_conn, **params)
-    logger.info("Shared DB pool created (min=%d, max=%d)", min_conn, max_conn)
+    _pool = pool.ThreadedConnectionPool(_DB_POOL_MIN, _DB_POOL_MAX, **params)
+    _conn_semaphore = threading.Semaphore(_DB_POOL_MAX)
+    logger.info("Shared DB pool created (min=%d, max=%d)", _DB_POOL_MIN, _DB_POOL_MAX)
     return _pool
 
 
 @contextmanager
 def get_connection() -> Generator:
-    """
-    Yield a pooled connection with pgvector registered.
+    """Yield a pooled connection with pgvector registered.
 
     Automatically commits on success, rolls back on error,
     and returns the connection to the pool in all cases.
+
+    A semaphore ensures callers block when every connection is
+    checked out, instead of raising ``PoolError`` immediately.
 
     Handles Neon's aggressive idle-connection drops by detecting
     stale connections during ``register_vector`` (the first real
     SQL query) and transparently replacing them.
     """
     p = get_pool()
+    assert _conn_semaphore is not None
+    _conn_semaphore.acquire()
     conn = None
     try:
         conn = p.getconn()
@@ -117,6 +129,7 @@ def get_connection() -> Generator:
     finally:
         if conn:
             p.putconn(conn)
+        _conn_semaphore.release()
 
 
 MAX_DB_RETRIES = 2
@@ -160,8 +173,9 @@ def retry_on_disconnect(fn):
 
 def close_pool() -> None:
     """Shut down the shared pool (call at app shutdown)."""
-    global _pool
+    global _pool, _conn_semaphore
     if _pool:
         _pool.closeall()
         _pool = None
+        _conn_semaphore = None
         logger.info("Shared DB pool closed.")

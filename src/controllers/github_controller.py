@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse
 
 from src.db import github_db
-from src.utils.auth import get_current_user
+from src.utils.auth import require_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +141,7 @@ async def github_auth_callback(code: str = Query(...), state: Optional[str] = Qu
 
 
 @router.get("/status", summary="Check GitHub connection status")
-async def github_status(user_id: Optional[str] = Depends(get_current_user)):
+async def github_status(user_id: str = Depends(require_current_user)):
     """Return whether a GitHub account is connected for the current user.
 
     Args:
@@ -150,14 +150,17 @@ async def github_status(user_id: Optional[str] = Depends(get_current_user)):
     Returns:
         Dict with ``connected`` flag and optional ``github_user``.
     """
-    info = github_db.get_github_user(user_id=user_id)
+    try:
+        info = await github_db.async_get_github_user(user_id=user_id)
+    except RuntimeError:
+        info = github_db.get_github_user(user_id=user_id)
     if info:
         return {"connected": True, **info}
     return {"connected": False}
 
 
 @router.post("/disconnect", summary="Disconnect GitHub account")
-async def github_disconnect(user_id: Optional[str] = Depends(get_current_user)):
+async def github_disconnect(user_id: str = Depends(require_current_user)):
     """Remove the stored GitHub token for the current user.
 
     Args:

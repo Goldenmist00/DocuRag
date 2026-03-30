@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Set
 
 from src.agents.ingest_agent import _ingest_chat_completion, _strip_json_fence
@@ -181,6 +182,9 @@ def _gather_initial_memories(
 ) -> List[Dict[str, Any]]:
     """Collect memories via topics, entities, and per-keyword text search.
 
+    All keyword searches run concurrently using a thread pool so
+    latency scales with the slowest single query, not the sum of all.
+
     Args:
         repo_id:  Repository UUID.
         keywords: Extracted keywords.
@@ -191,11 +195,32 @@ def _gather_initial_memories(
     Raises:
         None.
     """
-    acc: List[Dict[str, Any]] = []
+    if not keywords:
+        return []
+
+    tasks = []
     for kw in keywords:
-        acc.extend(repo_memory_db.search_by_text(repo_id, kw))
-        acc.extend(repo_memory_db.search_by_topics(repo_id, [kw]))
-        acc.extend(repo_memory_db.search_by_entities(repo_id, [kw]))
+        tasks.append(("text", kw))
+        tasks.append(("topics", kw))
+        tasks.append(("entities", kw))
+
+    acc: List[Dict[str, Any]] = []
+
+    def _run(kind: str, kw: str) -> List[Dict[str, Any]]:
+        if kind == "text":
+            return repo_memory_db.search_by_text(repo_id, kw)
+        if kind == "topics":
+            return repo_memory_db.search_by_topics(repo_id, [kw])
+        return repo_memory_db.search_by_entities(repo_id, [kw])
+
+    with ThreadPoolExecutor(max_workers=min(len(tasks), 8)) as pool:
+        futures = {pool.submit(_run, kind, kw): (kind, kw) for kind, kw in tasks}
+        for fut in as_completed(futures):
+            try:
+                acc.extend(fut.result())
+            except Exception:
+                pass
+
     return _dedupe_memory_rows(acc)
 
 
@@ -524,14 +549,31 @@ def _parse_query_llm_output(raw: str) -> Dict[str, Any]:
     def _clean(text: str) -> str:
         return _sanitize_mermaid(_strip_trailing_json_dupe(text))
 
+    def _unwrap(data: Dict[str, Any]) -> Dict[str, Any]:
+        """Unwrap double-nested JSON produced by some LLMs.
+
+        When the ``answer`` value is itself a JSON string containing an
+        ``answer`` key, extract the inner layer so the frontend receives
+        clean markdown instead of a raw JSON blob.
+        """
+        ans_raw = str(data.get("answer") or "")
+        cf = data.get("cited_files")
+        try:
+            nested = json.loads(ans_raw)
+            if isinstance(nested, dict) and "answer" in nested:
+                ans_raw = str(nested.get("answer") or "")
+                if not cf and isinstance(nested.get("cited_files"), list):
+                    cf = nested["cited_files"]
+        except (json.JSONDecodeError, TypeError):
+            pass
+        files = [str(x) for x in cf] if isinstance(cf, list) else []
+        return {"answer": _clean(ans_raw), "cited_files": files}
+
     try:
         inner = _strip_json_fence(raw)
         data = json.loads(inner)
         if isinstance(data, dict):
-            ans = _clean(str(data.get("answer") or ""))
-            cf = data.get("cited_files")
-            files = [str(x) for x in cf] if isinstance(cf, list) else []
-            return {"answer": ans, "cited_files": files}
+            return _unwrap(data)
     except (json.JSONDecodeError, TypeError, AttributeError):
         pass
 
@@ -540,10 +582,7 @@ def _parse_query_llm_output(raw: str) -> Dict[str, Any]:
         try:
             data = json.loads(raw[json_match.start():])
             if isinstance(data, dict):
-                ans = _clean(str(data.get("answer") or ""))
-                cf = data.get("cited_files")
-                files = [str(x) for x in cf] if isinstance(cf, list) else []
-                return {"answer": ans, "cited_files": files}
+                return _unwrap(data)
         except (json.JSONDecodeError, TypeError, AttributeError):
             pass
 
@@ -655,15 +694,34 @@ def answer_question(
 
     keywords = _extract_keywords(question)
 
-    vector_chunks = _vector_search_chunks(repo_id, question)
+    # ── Parallel retrieval (Cursor/Codex pattern) ──
+    # Run independent data fetches concurrently so total latency equals the
+    # slowest single fetch rather than the sum of all.
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        fut_vectors = pool.submit(_vector_search_chunks, repo_id, question)
+        fut_memories = pool.submit(_gather_initial_memories, repo_id, keywords)
+        fut_cons = pool.submit(repo_context_db.list_consolidations, repo_id)
+        fut_ctx = pool.submit(repo_context_db.find_by_repo_id, repo_id)
 
-    memories = _gather_initial_memories(repo_id, keywords)
+        vector_chunks = fut_vectors.result()
+        memories = fut_memories.result()
+        cons_all = fut_cons.result()
+        context_row = fut_ctx.result()
 
+    # ── Batch vector-path memory enrichment ──
+    # Instead of one DB call per file path (N+1 pattern), collect all
+    # basenames and search once per path concurrently.
     vector_file_paths = {ch.get("file_path") for ch in vector_chunks if ch.get("file_path")}
     if vector_file_paths:
-        for fp in vector_file_paths:
-            extra_rows = repo_memory_db.search_by_text(repo_id, fp.rsplit("/", 1)[-1])
-            memories = _dedupe_memory_rows(memories + extra_rows)
+        basenames = [fp.rsplit("/", 1)[-1] for fp in vector_file_paths]
+        with ThreadPoolExecutor(max_workers=min(len(basenames), 6)) as pool:
+            futs = [pool.submit(repo_memory_db.search_by_text, repo_id, bn) for bn in basenames]
+            for fut in as_completed(futs):
+                try:
+                    memories.extend(fut.result())
+                except Exception:
+                    pass
+        memories = _dedupe_memory_rows(memories)
 
     if len(memories) < MIN_MEMORIES_FOR_QUERY_MATCH:
         extra = _broader_memory_search(repo_id, question)
@@ -671,12 +729,9 @@ def answer_question(
 
     memories = _sort_by_importance(memories)
 
-    cons_all = repo_context_db.list_consolidations(repo_id)
     consolidations = _filter_consolidations(cons_all, keywords)
     if not consolidations and cons_all:
         consolidations = cons_all[:]
-
-    context_row = repo_context_db.find_by_repo_id(repo_id)
 
     slim = _simplify_memories_for_prompt(memories)
     user_prompt = _build_query_prompt(

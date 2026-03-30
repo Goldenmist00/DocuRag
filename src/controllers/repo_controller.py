@@ -8,8 +8,6 @@ method, and returns the response.  **No business logic lives here.**
 """
 
 import logging
-from typing import Optional
-
 from fastapi import APIRouter, Depends, HTTPException
 
 from src.controllers.repo_schemas import (
@@ -17,7 +15,7 @@ from src.controllers.repo_schemas import (
     RepoCreate,
     RepoQueryRequest,
 )
-from src.utils.auth import get_current_user
+from src.utils.auth import require_current_user
 from src.utils.repo_errors import RepoAnalyzerError
 from src.utils.repo_validation import validate_repo_id
 
@@ -27,7 +25,7 @@ router = APIRouter(prefix="/repos", tags=["repos"])
 
 
 @router.post("", status_code=202, responses={409: {"model": ErrorResponse}})
-async def create_repo(body: RepoCreate, user_id: Optional[str] = Depends(get_current_user)):
+async def create_repo(body: RepoCreate, user_id: str = Depends(require_current_user)):
     """Register and clone a GitHub repository.
 
     Args:
@@ -49,8 +47,11 @@ async def create_repo(body: RepoCreate, user_id: Optional[str] = Depends(get_cur
 
 
 @router.get("")
-async def list_repos(user_id: Optional[str] = Depends(get_current_user)):
+async def list_repos(user_id: str = Depends(require_current_user)):
     """Return repos for the authenticated user, ordered by creation date.
+
+    Uses the async DB pool so the event loop is never blocked by
+    this high-frequency polling endpoint.
 
     Args:
         user_id: Authenticated user email (injected via dependency).
@@ -60,7 +61,10 @@ async def list_repos(user_id: Optional[str] = Depends(get_current_user)):
     """
     from src.db import repo_db
 
-    return repo_db.list_all(user_id=user_id)
+    try:
+        return await repo_db.async_list_all(user_id=user_id)
+    except RuntimeError:
+        return repo_db.list_all(user_id=user_id)
 
 
 @router.get("/{repo_id}")
@@ -83,7 +87,10 @@ async def get_repo(repo_id: str):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    row = repo_db.find_by_id(repo_id)
+    try:
+        row = await repo_db.async_find_by_id(repo_id)
+    except RuntimeError:
+        row = repo_db.find_by_id(repo_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Repo not found")
     return row
@@ -111,6 +118,33 @@ async def reindex_repo(repo_id: str):
 
     try:
         return await trigger_reindex(repo_id)
+    except RepoAnalyzerError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
+
+
+@router.post("/{repo_id}/retry", status_code=202)
+async def retry_repo(repo_id: str, user_id: str = Depends(require_current_user)):
+    """Retry a failed clone/index pipeline for a repository.
+
+    Args:
+        repo_id: UUID of the repo.
+        user_id: Authenticated user email (injected via dependency).
+
+    Returns:
+        Status acknowledgement.
+
+    Raises:
+        HTTPException: 404 if not found, 502 if retry fails to schedule.
+    """
+    from src.agents.orchestrator import trigger_retry
+
+    try:
+        validate_repo_id(repo_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    try:
+        return await trigger_retry(repo_id)
     except RepoAnalyzerError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc))
 

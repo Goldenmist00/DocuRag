@@ -109,30 +109,24 @@ def upsert_token(
 def get_token(user_id: Optional[str] = None) -> Optional[str]:
     """Return the GitHub access token for a specific app user.
 
-    When ``user_id`` is provided, returns the token associated with
-    that app user. Falls back to the latest token if no user is specified
-    (backward-compatible).
-
     Args:
         user_id: App user email to look up.
 
     Returns:
-        The access token string, or ``None`` if none stored.
+        The access token string, or ``None`` if none stored or
+        ``user_id`` is not provided.
 
     Raises:
         psycopg2.Error: On database failure.
     """
+    if not user_id:
+        return None
     with get_connection() as conn:
         with conn.cursor() as cur:
-            if user_id:
-                cur.execute(
-                    f"SELECT access_token FROM {TABLE} WHERE user_id = %s LIMIT 1",
-                    (user_id,),
-                )
-            else:
-                cur.execute(
-                    f"SELECT access_token FROM {TABLE} ORDER BY updated_at DESC LIMIT 1"
-                )
+            cur.execute(
+                f"SELECT access_token FROM {TABLE} WHERE user_id = %s LIMIT 1",
+                (user_id,),
+            )
             row = cur.fetchone()
     return row[0] if row else None
 
@@ -141,31 +135,25 @@ def get_token(user_id: Optional[str] = None) -> Optional[str]:
 def get_github_user(user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Return the GitHub user info for a specific app user.
 
-    When ``user_id`` is provided, returns only the connection belonging
-    to that app user. Falls back to the latest entry if unspecified.
-
     Args:
         user_id: App user email to look up.
 
     Returns:
-        Dict with ``github_user`` and ``scope``, or ``None``.
+        Dict with ``github_user`` and ``scope``, or ``None`` if not
+        found or ``user_id`` is not provided.
 
     Raises:
         psycopg2.Error: On database failure.
     """
+    if not user_id:
+        return None
     with get_connection() as conn:
         with conn.cursor() as cur:
-            if user_id:
-                cur.execute(
-                    f"SELECT github_user, scope, updated_at FROM {TABLE} "
-                    f"WHERE user_id = %s LIMIT 1",
-                    (user_id,),
-                )
-            else:
-                cur.execute(
-                    f"SELECT github_user, scope, updated_at FROM {TABLE} "
-                    f"ORDER BY updated_at DESC LIMIT 1"
-                )
+            cur.execute(
+                f"SELECT github_user, scope, updated_at FROM {TABLE} "
+                f"WHERE user_id = %s LIMIT 1",
+                (user_id,),
+            )
             row = cur.fetchone()
     if not row:
         return None
@@ -207,3 +195,31 @@ def delete_token(github_user: Optional[str] = None, user_id: Optional[str] = Non
             deleted = cur.rowcount > 0
         conn.commit()
     return deleted
+
+
+# ── Async variants (asyncpg) ──────────────────────────────────────────
+
+async def async_get_github_user(user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Async version of ``get_github_user``.
+
+    Args:
+        user_id: App user email to look up.
+
+    Returns:
+        Dict with ``github_user`` and ``scope``, or ``None``.
+    """
+    if not user_id:
+        return None
+    from src.db.async_pool import fetch_row
+
+    row = await fetch_row(
+        f"SELECT github_user, scope, updated_at FROM {TABLE} WHERE user_id = $1 LIMIT 1",
+        user_id,
+    )
+    if not row:
+        return None
+    return {
+        "github_user": row["github_user"],
+        "scope": row["scope"],
+        "connected_at": str(row["updated_at"]) if row.get("updated_at") else None,
+    }
